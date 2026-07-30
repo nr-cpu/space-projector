@@ -149,10 +149,17 @@ export function visibleBodies(
     sun: true,
     moon: true,
     stars: true,
+    deepStars: false,
     satellites: false,
     planets: false,
+    meteors: false,
+    showComets: false,
+    milkyWay: false,
     magLimit: VISIBLE_MAG_LIMIT,
+    deepStarMagLimit: 0,
+    cometMagLimit: 0,
     tles: [],
+    comets: [],
   });
   const out: { name: string; azDeg: number; elDeg: number; mag?: number }[] = [];
   if (sky.sun && sky.sun.alt > minElDeg) {

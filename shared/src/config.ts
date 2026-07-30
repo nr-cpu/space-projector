@@ -260,6 +260,9 @@ export interface Config {
   projectionMode: ProjectionMode;
 
   // --- filtering ---
+  /** Master aircraft show/hide, independent of the altitude filters below
+   *  (a pure-sky "satellite watching" mode leaves this off). */
+  showAircraft: boolean;
   minAltitudeFt: number;
   maxAltitudeFt: number;
   hideOnGround: boolean;
@@ -318,6 +321,10 @@ export interface Config {
   showSatellites: boolean; // includes the ISS
   /** Label non-ISS satellites with their names (the ISS is always labelled). */
   satelliteLabels: boolean;
+  /** Only label satellites nearer than this many degrees from the current
+   *  zoom/pan center — avoids thousands of overlapping names at once. 0 =
+   *  label everything in frame (fine at low satellite counts, not at scale). */
+  satelliteLabelRadiusDeg: number;
   /** Draw the naked-eye planets (Venus, Jupiter, Mars, Saturn, Mercury). */
   showPlanets: boolean;
   /** Per-constellation asterism line visibility. Missing/unknown ids default to visible. */
@@ -326,8 +333,33 @@ export interface Config {
   starMagLimit: number;
   /** Faintest star magnitude to label with its name (higher = more names). */
   starLabelMagLimit: number;
+  /** Dense unlabeled faint-star background field (thousands of stars),
+   *  distinct from the small named/labeled catalog above. */
+  showDeepStars: boolean;
+  /** Faintest deep-field star magnitude to draw (higher = more stars, denser
+   *  field; ~6.5 is the traditional naked-eye limit). */
+  deepStarMagLimit: number;
+  /** Soft diffuse glow along the Milky Way's galactic plane. */
+  showMilkyWay: boolean;
+  /** Milky Way glow opacity 0..1. */
+  milkyWayOpacity: number;
+  /** Simulated shooting-star streaks, biased toward real meteor shower
+   *  radiants/dates (not real-time detections — there is no such feed). */
+  showMeteors: boolean;
+  /** Real comet positions computed from published orbital elements, shown
+   *  only when a comet is actually near/above naked-eye brightness. */
+  showComets: boolean;
+  /** Faintest comet apparent magnitude to draw (lower = stricter/brighter-only). */
+  cometMagLimit: number;
   /** Offset the sky clock for testing/scrubbing, minutes (0 = live). */
   skyTimeOffsetMin: number;
+  /** Sky-dome zoom, 1 = full hemisphere edge-to-edge (current behavior).
+   *  >1 zooms in around skyPanAz/skyPanAlt. */
+  skyZoom: number;
+  /** Zoom/pan center, azimuth degrees from North. */
+  skyPanAz: number;
+  /** Zoom/pan center, altitude degrees above horizon. */
+  skyPanAlt: number;
 
   // --- "window to elsewhere" ---
   /** Faint great-circle arc toward each plane's destination. */
@@ -354,9 +386,13 @@ export const DEFAULT_CONFIG: Config = {
   mirrorX: true,
   mirrorY: false,
   labelRotationDeg: 0,
-  // Default to the flat ground plan (the original look); "sky" is opt-in.
-  projectionMode: "map",
+  // "sky" (realistic look-up dome) is the default — this fork's satellite
+  // field, deep star background, and Milky Way glow only render on the
+  // dome; "map" (the original flat radar-style plan) is still available
+  // as an option in the control panel for anyone who prefers it.
+  projectionMode: "sky",
 
+  showAircraft: true,
   minAltitudeFt: 100,
   maxAltitudeFt: 60000,
   hideOnGround: true,
@@ -414,12 +450,28 @@ export const DEFAULT_CONFIG: Config = {
   showSun: true,
   showMoon: true,
   showSatellites: true,
-  satelliteLabels: false,
+  satelliteLabels: true,
+  // Unlimited labels floods the screen once a real catalog (thousands of
+  // objects) is loaded — gate to a modest radius around the pan/zoom center
+  // so first boot shows a clean sky, not a wall of "STARLINK-####" text.
+  // Zooming in naturally shrinks the labeled area further; panning to a
+  // region of interest reveals its names.
+  satelliteLabelRadiusDeg: 8,
   showPlanets: true,
   constellations: Object.fromEntries(CONSTELLATIONS.map((c) => [c.id, true])),
   starMagLimit: 2.6,
   starLabelMagLimit: 0.3,
+  showDeepStars: true,
+  deepStarMagLimit: 6.5,
+  showMilkyWay: true,
+  milkyWayOpacity: 0.6,
+  showMeteors: true,
+  showComets: true,
+  cometMagLimit: 8,
   skyTimeOffsetMin: 0,
+  skyZoom: 1,
+  skyPanAz: 0,
+  skyPanAlt: 90,
 
   showDestArc: true,
   showRouteDetail: true,

@@ -27,6 +27,20 @@ body,
   width: 100%;
   height: 100%;
   display: block;
+  /* A small red dot instead of the OS arrow — the arrow reads as a UI chrome
+     leak on a projected dome; a laser-pointer-style dot doesn't, and it's
+     needed now that scroll/drag control the sky zoom/pan directly on this
+     canvas (cursor: none on the page would hide where you're pointing). */
+  cursor:
+    url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><circle cx="4" cy="4" r="2" fill="%23ff2d2d" fill-opacity="0.9"/></svg>')
+      4 4,
+    crosshair;
+}
+/* Idle timeout (see Display.tsx) hides the cursor entirely after a few
+   seconds of no mouse movement — the ambient/kiosk look, restored the
+   moment the pointer moves again. */
+.display-canvas.cursor-idle {
+  cursor: none;
 }
 .hud {
   position: fixed;
@@ -85,4 +99,17 @@ body,
 }
 .ambient-warn {
   color: #e0a23d;
+}
+.hover-tip {
+  position: absolute;
+  transform: translate(14px, -50%);
+  font: 11px "JetBrains Mono", ui-monospace, monospace;
+  color: #e8ecff;
+  background: rgba(10, 12, 16, 0.75);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  padding: 3px 7px;
+  border-radius: 4px;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 5;
 }

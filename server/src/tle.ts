@@ -11,8 +11,20 @@ export interface Tle {
   line2: string;
 }
 
+// Celestrak's full "active" catalog (~10,000 objects) returns HTTP 403 —
+// Celestrak deliberately gates that endpoint against casual/scripted
+// access. "starlink" alone is a real, non-blocked, thousands-of-objects
+// group (SpaceX's constellation, several thousand satellites), so it's the
+// default for a genuine "thousands of satellites" sky. Celestrak also
+// caches each GROUP per-IP for 2 hours ("data has not updated since your
+// last successful download") — expected politeness throttling, not an
+// error; TleStore's refresh cadence already respects it.
+//
+// Override with TLE_URL for a different mix, e.g. GROUP=oneweb, GROUP=geo,
+// or GROUP=visual (the original ~200-brightest-only default). Celestrak's
+// gp.php does not support combining multiple GROUPs in one query.
 const DEFAULT_URL =
-  "https://celestrak.org/NORAD/elements/gp.php?GROUP=visual&FORMAT=tle";
+  "https://celestrak.org/NORAD/elements/gp.php?GROUP=starlink&FORMAT=tle";
 
 function parseTle(text: string): Tle[] {
   const lines = text.split(/\r?\n/).map((l) => l.trimEnd()).filter((l) => l.length);
@@ -59,8 +71,14 @@ export class TleStore {
   private async refresh(): Promise<void> {
     try {
       const res = await fetch(this.url, { signal: AbortSignal.timeout(15000) });
+      const body = await res.text();
+      // Celestrak returns HTTP 200 with a plain-text throttle notice (not an
+      // error status) when a GROUP was already downloaded within its 2-hour
+      // per-IP cache window — e.g. "data has not updated since your last
+      // successful download". That parses to zero TLEs; treat it as a no-op
+      // refresh (keep serving the existing cache) rather than a silent drop.
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const tles = parseTle(await res.text());
+      const tles = parseTle(body);
       if (tles.length) {
         this.tles = tles;
         this.fetchedAt = Date.now();
@@ -71,6 +89,10 @@ export class TleStore {
           "utf8",
         );
         console.log(`[tle] refreshed ${tles.length} satellites`);
+      } else {
+        console.log(
+          `[tle] fetch returned no parseable TLEs (likely Celestrak's per-GROUP cache throttle); keeping existing ${this.tles.length} cached`,
+        );
       }
     } catch (err) {
       console.error("[tle] refresh failed (using cache):", err instanceof Error ? err.message : err);

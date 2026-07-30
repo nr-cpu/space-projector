@@ -13,6 +13,7 @@ import { RouteEnricher } from "./enrich/routes.js";
 import { Poller } from "./datasource.js";
 import { Hub } from "./hub.js";
 import { TleStore } from "./tle.js";
+import { CometStore } from "./comets.js";
 import { resolveLocation } from "./geocode.js";
 import { buildHostMatcher, originHostname } from "./allowed-hosts.js";
 import { SfoGroundPoller } from "./sfo-ground.js";
@@ -66,6 +67,9 @@ async function main(): Promise<void> {
 
   const tleStore = new TleStore(resolve(DATA_DIR, "tle-cache.json"));
   await tleStore.load();
+
+  const cometStore = new CometStore(resolve(DATA_DIR, "comet-cache.json"));
+  await cometStore.load();
 
   const app = express();
 
@@ -143,6 +147,7 @@ async function main(): Promise<void> {
   app.get("/api/aircraft", (_req, res) => res.json(poller.getSnapshot()));
   app.get("/api/status", (_req, res) => res.json(poller.getStatus()));
   app.get("/api/tle", async (_req, res) => res.json(await tleStore.get()));
+  app.get("/api/comets", async (_req, res) => res.json(await cometStore.get()));
   app.post("/api/source", (req, res) => {
     const s = req.body?.source;
     if (s !== "radio" && s !== "api") {

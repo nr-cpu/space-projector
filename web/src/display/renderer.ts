@@ -31,6 +31,9 @@ import {
   groundToSkyAngles,
   projectAircraft,
   projectSkyPoint,
+  projectSkyPointZoomed,
+  angularSeparationDeg,
+  inZoomedSkyField,
   skyGlyphScale,
   lerpAzimuth,
   DEG,
@@ -49,7 +52,7 @@ import {
   type SkyAngles,
 } from "@shared/index.js";
 import { classifyGlyph, drawAircraftGlyph, GLYPH_SCALE } from "./aircraftGlyph.js";
-import { computeSky, type Sky, type Tle } from "./celestial.js";
+import { computeSky, type Sky, type Tle, type CometElements } from "./celestial.js";
 import { visibleAsterisms } from "./stars.js";
 import tzLookup from "tz-lookup";
 
@@ -78,6 +81,12 @@ function starDrawSize(mag: number): number {
 /** Gap between sky-object edge and label anchor, px. */
 const SKY_LABEL_GAP = 4;
 
+/** Radius of each overlapping glow blob composing the Milky Way band, px.
+ *  Scales with screen size elsewhere would be nicer, but a fixed value tuned
+ *  for a ~1080p display keeps the drawMilkyWay loop simple; revisit if the
+ *  band reads too thin/thick on very different resolutions. */
+const MILKY_WAY_BAND_PX = 90;
+
 interface SkyLabelEntry {
   p: Point;
   name: string;
@@ -94,6 +103,16 @@ interface Sample {
   altFt: number;
   track?: number;
   gs?: number;
+}
+
+/** A hoverable on-screen thing, rebuilt fresh every frame. hitTest() picks
+ *  the nearest one within its radius; short-label callers keep it to 1-2
+ *  words so the tooltip doesn't compete with the sky itself. */
+interface HoverTarget {
+  x: number;
+  y: number;
+  r: number; // hit-test radius, px
+  label: string;
 }
 
 interface Track {
@@ -206,9 +225,22 @@ export class Renderer {
   /** Current frame time in seconds, for animating props/rotors. */
   private frameT = 0;
 
+  /** Hoverable on-screen things, rebuilt every frame — see hitTest(). */
+  private hoverTargets: HoverTarget[] = [];
+
   // Sky layer state.
   private tles: Tle[] = [];
-  private sky: Sky = { stars: [], sats: [], planets: [] };
+  private comets: CometElements[] = [];
+  private sky: Sky = {
+    stars: [],
+    deepStars: [],
+    sats: [],
+    planets: [],
+    meteors: [],
+    comets: [],
+    milkyWay: [],
+    activeShowers: [],
+  };
   private skyComputedAt = 0;
   private skyOffsetUsed = NaN;
 
@@ -229,7 +261,9 @@ export class Renderer {
 
   start(): void {
     void this.fetchTles();
+    void this.fetchComets();
     setInterval(() => void this.fetchTles(), 3600_000);
+    setInterval(() => void this.fetchComets(), 6 * 3600_000);
     const loop = (now: number) => {
       this.raf = requestAnimationFrame(loop);
       // Cap to maxFps via an accumulator: advance a running "due" time by whole
@@ -257,6 +291,15 @@ export class Renderer {
     try {
       const res = await fetch("/api/tle");
       if (res.ok) this.tles = (await res.json()) as Tle[];
+    } catch {
+      /* keep whatever we had */
+    }
+  }
+
+  private async fetchComets(): Promise<void> {
+    try {
+      const res = await fetch("/api/comets");
+      if (res.ok) this.comets = (await res.json()) as CometElements[];
     } catch {
       /* keep whatever we had */
     }
@@ -315,6 +358,7 @@ export class Renderer {
   }
 
   private passesFilter(ac: Aircraft, cfg: Config): boolean {
+    if (!cfg.showAircraft) return false;
     if (cfg.hideOnGround && ac.onGround) return false;
     const alt = ac.altBaro ?? ac.altGeom;
     if (alt != null) {
@@ -380,6 +424,21 @@ export class Renderer {
     );
   }
 
+  /** Nearest hoverable within its hit radius (screen px, canvas-relative),
+   *  or null. Called from pointermove on the canvas element. */
+  hitTest(x: number, y: number): string | null {
+    let best: HoverTarget | null = null;
+    let bestDist = Infinity;
+    for (const t of this.hoverTargets) {
+      const d = Math.hypot(x - t.x, y - t.y);
+      if (d <= t.r && d < bestDist) {
+        best = t;
+        bestDist = d;
+      }
+    }
+    return best?.label ?? null;
+  }
+
   private draw(): void {
     const cfg = this.getConfig();
     const ctx = this.ctx;
@@ -387,6 +446,7 @@ export class Renderer {
     const frameDt = this.prevFrame ? (now - this.prevFrame) / 1000 : 0.016;
     this.prevFrame = now;
     this.frameT = now / 1000;
+    this.hoverTargets = [];
 
     if (this.canvas.clientWidth !== this.w || this.canvas.clientHeight !== this.h) {
       this.resize();
@@ -469,6 +529,13 @@ export class Renderer {
         cfg.projectionMode === "sky" && sky ? skyGlyphScale(sky.slantM) : 1;
 
       visible.push({ tr, sample, sky, p, heading, rangeMi, alpha, color, emergency, sizeScale });
+      const acName = tr.ac.flight?.trim() || tr.ac.hex.toUpperCase();
+      this.hoverTargets.push({
+        x: p.x,
+        y: p.y,
+        r: Math.max(10, cfg.glyphSizePx * 0.6 * sizeScale),
+        label: `${acName} · aircraft`,
+      });
     }
 
     // Nearest last so it paints on top.
@@ -686,38 +753,111 @@ export class Renderer {
     return this.toPoint(sample, cfg, proj);
   }
 
-  // --- sky layer (sun / moon / stars / satellites) ---
+  // --- sky layer (sun / moon / stars / satellites / meteors / comets) ---
   private updateSky(cfg: Config, now: number): void {
     const want =
-      cfg.showStars || cfg.showSun || cfg.showMoon || cfg.showSatellites || cfg.showPlanets;
+      cfg.showStars ||
+      cfg.showDeepStars ||
+      cfg.showSun ||
+      cfg.showMoon ||
+      cfg.showSatellites ||
+      cfg.showPlanets ||
+      cfg.showMeteors ||
+      cfg.showComets ||
+      cfg.showMilkyWay;
     if (!want) {
-      this.sky = { stars: [], sats: [], planets: [] };
+      this.sky = {
+        stars: [],
+        deepStars: [],
+        sats: [],
+        planets: [],
+        meteors: [],
+        comets: [],
+        milkyWay: [],
+        activeShowers: [],
+      };
       return;
     }
-    if (now - this.skyComputedAt < 300 && this.skyOffsetUsed === cfg.skyTimeOffsetMin) return;
-    this.skyComputedAt = now;
+    // Meteors animate every frame (short-lived streaks); everything else is
+    // cheap enough at ~3 Hz but not worth recomputing every frame.
+    const skipStatic =
+      now - this.skyComputedAt < 300 && this.skyOffsetUsed === cfg.skyTimeOffsetMin;
+    if (skipStatic && !cfg.showMeteors) return;
     this.skyOffsetUsed = cfg.skyTimeOffsetMin;
     const date = new Date(Date.now() + cfg.skyTimeOffsetMin * 60000);
-    this.sky = computeSky(date, cfg.centerLat, cfg.centerLon, {
+    const next = computeSky(date, cfg.centerLat, cfg.centerLon, {
       sun: cfg.showSun,
       moon: cfg.showMoon,
       stars: cfg.showStars,
+      deepStars: cfg.showDeepStars,
       satellites: cfg.showSatellites,
       planets: cfg.showPlanets,
+      meteors: cfg.showMeteors,
+      showComets: cfg.showComets,
+      milkyWay: cfg.showMilkyWay,
       magLimit: cfg.starMagLimit,
+      deepStarMagLimit: cfg.deepStarMagLimit,
+      cometMagLimit: cfg.cometMagLimit,
       tles: this.tles,
+      comets: this.comets,
     });
+    if (skipStatic) {
+      // Only the meteor layer needed refreshing this tick.
+      this.sky = { ...this.sky, meteors: next.meteors, activeShowers: next.activeShowers };
+    } else {
+      this.sky = next;
+      this.skyComputedAt = now;
+    }
   }
 
-  /** Place an (azimuth, altitude) sky point on the field. Zenith=center, horizon=edge. */
+  /** Place an (azimuth, altitude) sky point on the field, honoring the
+   *  current zoom/pan. Zoom=1 + pan centered on zenith = full-hemisphere
+   *  view (unchanged legacy behavior). */
   private projectSky(az: number, alt: number, cfg: Config, proj: ProjOpts): Point {
-    return projectSkyPoint(az, alt, proj, this.horizonM(cfg));
+    return projectSkyPointZoomed(
+      az,
+      alt,
+      cfg.skyPanAz,
+      cfg.skyPanAlt,
+      cfg.skyZoom,
+      proj,
+      this.horizonM(cfg),
+    );
+  }
+
+  /** Whether a sky point at (az, alt) currently falls within the visible
+   *  zoomed/panned field (a bit past the edge, for labels whose anchor is
+   *  offset outward from the object). */
+  private inSkyView(az: number, alt: number, cfg: Config): boolean {
+    if (cfg.skyZoom <= 1) return true;
+    const sep = angularSeparationDeg(cfg.skyPanAz, cfg.skyPanAlt, az, alt);
+    return sep <= 90 / cfg.skyZoom + 3;
   }
 
   private drawSky(cfg: Config, proj: ProjOpts): void {
     const ctx = this.ctx;
     const b = cfg.brightness;
     const skyLabels: SkyLabelEntry[] = [];
+
+    // Milky Way band glow — drawn first (background), a faint diffuse arc
+    // along the galactic plane. Everything else layers on top of it.
+    if (cfg.showMilkyWay) this.drawMilkyWay(cfg, proj, b);
+
+    // Dense unlabeled faint-star background field — drawn before the named
+    // catalog so bright named stars still read as the visual focal points.
+    if (cfg.showDeepStars && this.sky.deepStars.length) {
+      for (const s of this.sky.deepStars) {
+        const p = this.projectSky(s.az, s.alt, cfg, proj);
+        const mag = s.mag ?? 5;
+        const size = Math.max(0.4, 1.6 - mag * 0.22);
+        const a = clamp01((7 - mag) / 7) * b * 0.55;
+        if (a <= 0.02) continue;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, size, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(200,212,240,${a})`;
+        ctx.fill();
+      }
+    }
 
     // Asterism lines (faint) — need star screen points by id.
     if (cfg.showStars && this.sky.stars.length) {
@@ -766,15 +906,19 @@ export class Renderer {
             priority: mag,
           });
         }
+        this.hoverTargets.push({ x: p.x, y: p.y, r: Math.max(6, size + 4), label: s.name ? `${s.name} · star` : "star" });
       }
     }
 
     if (cfg.showMoon && this.sky.moon && this.sky.moon.alt > -2) {
-      this.drawMoon(this.projectSky(this.sky.moon.az, this.sky.moon.alt, cfg, proj),
-        this.sky.moon.illum ?? 1, this.sky.moon.waning ?? false, b);
+      const p = this.projectSky(this.sky.moon.az, this.sky.moon.alt, cfg, proj);
+      this.drawMoon(p, this.sky.moon.illum ?? 1, this.sky.moon.waning ?? false, b);
+      this.hoverTargets.push({ x: p.x, y: p.y, r: 14, label: "Moon" });
     }
     if (cfg.showSun && this.sky.sun && this.sky.sun.alt > -2) {
-      this.drawSun(this.projectSky(this.sky.sun.az, this.sky.sun.alt, cfg, proj), b);
+      const p = this.projectSky(this.sky.sun.az, this.sky.sun.alt, cfg, proj);
+      this.drawSun(p, b);
+      this.hoverTargets.push({ x: p.x, y: p.y, r: 20, label: "Sun" });
     }
     if (cfg.showPlanets && this.sky.planets.length) {
       for (const pl of this.sky.planets) {
@@ -802,11 +946,15 @@ export class Renderer {
             priority: mag,
           });
         }
+        this.hoverTargets.push({ x: p.x, y: p.y, r: Math.max(8, size + 5), label: `${pl.name} · planet` });
       }
     }
 
     if (cfg.showSatellites && this.sky.sats.length) {
       for (const sat of this.sky.sats) {
+        // At scale (thousands of satellites), skip drawing anything outside
+        // the current zoom/pan field entirely rather than just its label.
+        if (!this.inSkyView(sat.az, sat.alt, cfg)) continue;
         const p = this.projectSky(sat.az, sat.alt, cfg, proj);
         const iss = sat.kind === "iss";
         const size = iss ? 3 : 1.6;
@@ -817,7 +965,14 @@ export class Renderer {
           ctx.shadowColor = `rgba(140,255,214,${b})`;
           ctx.shadowBlur = 10;
         } else {
-          ctx.fillStyle = `rgba(170,205,255,${0.65 * b})`;
+          // Real satellites vary noticeably in brightness as their attitude
+          // and solar panels catch the light — a slow per-object flicker
+          // (phase-offset by az so they don't all pulse in lockstep) reads
+          // as that same tumble/glint rather than a flat grid of dots. A
+          // faint warm tint (vs. the cool star-blue) also helps them read as
+          // a distinct population at a glance, not just more stars.
+          const tw = 0.55 + 0.45 * Math.sin(this.frameT * 1.1 + sat.az * 3.7);
+          ctx.fillStyle = `rgba(210,225,255,${0.55 * b * tw})`;
         }
         ctx.fill();
         ctx.shadowBlur = 0;
@@ -830,7 +985,7 @@ export class Renderer {
             alpha: 0.9 * b,
             priority: -1,
           });
-        } else if (cfg.satelliteLabels && sat.name) {
+        } else if (cfg.satelliteLabels && sat.name && this.satelliteLabelEligible(sat, cfg)) {
           skyLabels.push({
             p,
             name: sat.name,
@@ -840,10 +995,115 @@ export class Renderer {
             priority: 5,
           });
         }
+        this.hoverTargets.push({
+          x: p.x,
+          y: p.y,
+          r: Math.max(6, size + 4),
+          label: iss ? "ISS" : sat.name ? `${sat.name} · satellite` : "satellite",
+        });
       }
     }
 
+    if (cfg.showComets && this.sky.comets.length) {
+      for (const comet of this.sky.comets) {
+        const p = this.projectSky(comet.az, comet.alt, cfg, proj);
+        const mag = comet.mag ?? 6;
+        const size = Math.max(1.4, Math.min(3.5, 4 - mag * 0.35));
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, size, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(180,235,220,${0.85 * b})`;
+        ctx.shadowColor = `rgba(180,235,220,${0.7 * b})`;
+        ctx.shadowBlur = size * 4; // soft coma glow
+        ctx.fill();
+        ctx.shadowBlur = 0;
+        if (comet.name) {
+          skyLabels.push({
+            p,
+            name: comet.name,
+            color: "#B4EBDC",
+            size,
+            alpha: 0.85 * b,
+            priority: -0.5,
+          });
+        }
+        this.hoverTargets.push({
+          x: p.x,
+          y: p.y,
+          r: Math.max(8, size + 5),
+          label: comet.name ? `${comet.name} · comet` : "comet",
+        });
+      }
+    }
+
+    if (cfg.showMeteors && this.sky.meteors.length) {
+      ctx.save();
+      ctx.lineCap = "round";
+      for (const m of this.sky.meteors) {
+        const p1 = this.projectSky(m.az1, m.alt1, cfg, proj);
+        const p2 = this.projectSky(m.az2, m.alt2, cfg, proj);
+        const a = m.alpha * b;
+        const grad = ctx.createLinearGradient(p1.x, p1.y, p2.x, p2.y);
+        grad.addColorStop(0, `rgba(255,255,255,0)`);
+        grad.addColorStop(1, `rgba(255,255,255,${0.9 * a})`);
+        ctx.strokeStyle = grad;
+        ctx.lineWidth = 1.6;
+        ctx.shadowColor = `rgba(255,255,255,${0.6 * a})`;
+        ctx.shadowBlur = 4;
+        ctx.beginPath();
+        ctx.moveTo(p1.x, p1.y);
+        ctx.lineTo(p2.x, p2.y);
+        ctx.stroke();
+      }
+      ctx.shadowBlur = 0;
+      ctx.restore();
+    }
+
     if (skyLabels.length) this.placeSkyLabels(skyLabels, cfg);
+  }
+
+  /** Milky Way band — a soft glow along the great circle of the galactic
+   *  plane, drawn as a chain of overlapping radial gradients so it reads as
+   *  diffuse light rather than individual points. Orientation uses the
+   *  galactic-pole coordinates (J2000: RA 192.85°, Dec 27.13°) rotated into
+   *  the local sky via the same sidereal-time math as the star field. */
+  private drawMilkyWay(cfg: Config, proj: ProjOpts, b: number): void {
+    const ctx = this.ctx;
+    const opacity = cfg.milkyWayOpacity * b;
+    if (opacity <= 0.01 || !this.sky.milkyWay.length) return;
+    const pts: Point[] = [];
+    for (const { az, alt } of this.sky.milkyWay) {
+      if (alt < -15) continue;
+      const a = Math.max(alt, -2);
+      if (!inZoomedSkyField(az, a, cfg.skyPanAz, cfg.skyPanAlt, cfg.skyZoom)) continue;
+      pts.push(this.projectSky(az, a, cfg, proj));
+    }
+    if (pts.length < 2) return;
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    for (let i = 0; i < pts.length; i++) {
+      const p = pts[i];
+      const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, MILKY_WAY_BAND_PX);
+      g.addColorStop(0, `rgba(180,190,215,${0.05 * opacity})`);
+      g.addColorStop(1, "rgba(180,190,215,0)");
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, MILKY_WAY_BAND_PX, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  /** Only label a non-ISS satellite when label density control allows it:
+   *  0 = unlimited (fine at low satellite counts); otherwise only within
+   *  satelliteLabelRadiusDeg of the current pan/zoom center, so a
+   *  full ~10,000-object catalog doesn't draw thousands of overlapping names. */
+  private satelliteLabelEligible(
+    sat: { az: number; alt: number },
+    cfg: Config,
+  ): boolean {
+    if (cfg.satelliteLabelRadiusDeg <= 0) return true;
+    const sep = angularSeparationDeg(cfg.skyPanAz, cfg.skyPanAlt, sat.az, sat.alt);
+    return sep <= cfg.satelliteLabelRadiusDeg;
   }
 
   private drawSun(p: Point, b: number): void {
@@ -1033,11 +1293,16 @@ export class Renderer {
     if (cfg.projectionMode === "sky" && v.sky) {
       // Curve along the dome from the aircraft's sky position toward the
       // destination azimuth at the horizon — a realistic look-up great-circle hint.
+      // When zoomed in, the curve legitimately runs off the edge of the
+      // zoomed field well before reaching the true horizon — stop there
+      // rather than let it project to a clamped/distorted position (that
+      // reads as a stray line shooting across the whole canvas).
       const steps = 10;
       for (let i = 1; i <= steps; i++) {
         const f = i / steps;
         const az = lerpAzimuth(v.sky.az, destAz, f);
         const elev = v.sky.elev * (1 - f * f);
+        if (!inZoomedSkyField(az, elev, cfg.skyPanAz, cfg.skyPanAlt, cfg.skyZoom)) break;
         pts.push(this.projectSky(az, elev, cfg, proj));
       }
     } else {

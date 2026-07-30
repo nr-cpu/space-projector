@@ -7,6 +7,8 @@ import * as AstronomyNS from "astronomy-engine";
 import * as satelliteNS from "satellite.js";
 import { DEG } from "./constants.js";
 import { STARS } from "./stars.js";
+import { DEEP_STARS } from "./stars-deep.js";
+import { activeShowers, type MeteorShower } from "./meteors.js";
 
 // Both packages ship UMD/CJS bundles. Under some Node versions the ESM
 // namespace only exposes `default` (the module lexer can't parse the UMD
@@ -18,7 +20,16 @@ const satellite: typeof satelliteNS =
 
 const R2D = 180 / Math.PI;
 
-export type SkyKind = "sun" | "moon" | "star" | "satellite" | "iss" | "planet";
+export type SkyKind =
+  | "sun"
+  | "moon"
+  | "star"
+  | "deepstar"
+  | "satellite"
+  | "iss"
+  | "planet"
+  | "meteor"
+  | "comet";
 
 export interface SkyBody {
   kind: SkyKind;
@@ -31,28 +42,75 @@ export interface SkyBody {
   waning?: boolean;
 }
 
+/** A simulated meteor streak: a start point, a heading, and an angular length
+ *  it travels across one render tick's worth of sky before expiring. */
+export interface MeteorStreak {
+  id: string;
+  shower: string;
+  /** Path endpoints, degrees (az/alt), for this instant's frame. */
+  az1: number;
+  alt1: number;
+  az2: number;
+  alt2: number;
+  /** 0..1 fade-out over the streak's short lifetime. */
+  alpha: number;
+}
+
 export interface Tle {
   name: string;
   line1: string;
   line2: string;
 }
 
+export interface CometElements {
+  name: string;
+  epochJd: number;
+  e: number;
+  q: number;
+  i: number;
+  w: number;
+  om: number;
+  tp: number;
+  m1?: number;
+  k1?: number;
+}
+
 export interface Sky {
   sun?: SkyBody;
   moon?: SkyBody;
   stars: SkyBody[];
+  deepStars: SkyBody[];
   sats: SkyBody[];
   planets: SkyBody[];
+  meteors: MeteorStreak[];
+  comets: SkyBody[];
+  /** Points tracing the galactic plane's great circle (az/alt), for the
+   *  Milky Way band glow. Only alt is meaningful per-point; consumers draw a
+   *  soft glow along the path, not individual markers. */
+  milkyWay: { az: number; alt: number }[];
+  /** Currently-active meteor showers (for HUD/status display), highest activity first. */
+  activeShowers: { name: string; fraction: number }[];
 }
 
 export interface SkyOpts {
   sun: boolean;
   moon: boolean;
   stars: boolean;
+  deepStars: boolean;
   satellites: boolean;
   planets: boolean;
+  meteors: boolean;
+  showComets: boolean;
+  milkyWay: boolean;
   magLimit: number;
+  /** Faintest deep-field star magnitude to draw (independent of magLimit,
+   *  which governs the small named/labeled catalog). */
+  deepStarMagLimit: number;
+  /** Faintest comet apparent magnitude to draw (comets are usually invisible;
+   *  this keeps the layer from drawing dim clutter with no naked-eye chance). */
+  cometMagLimit: number;
   tles: Tle[];
+  comets: CometElements[];
 }
 
 /** Naked-eye planets, in rough order of how often they're a standout. */
@@ -67,6 +125,57 @@ const PLANETS: { body: AstronomyNS.Body; name: string }[] = [
 function norm360(d: number): number {
   return ((d % 360) + 360) % 360;
 }
+
+// --- Milky Way galactic plane (J2000 equatorial pole of the galactic frame) ---
+// North galactic pole: RA 192.85948°, Dec +27.12825°. Galactic center (l=0):
+// RA 266.405°, Dec -28.936°. Standard IAU 1958 galactic coordinate definition.
+const GAL_POLE_RA = 192.85948 * DEG;
+const GAL_POLE_DEC = 27.12825 * DEG;
+const GAL_CENTER_RA = 266.405 * DEG;
+const GAL_CENTER_DEC = -28.936 * DEG;
+
+/** Precomputed galactic-plane great circle, as J2000 RA/Dec (degrees), one
+ *  point per degree of galactic longitude. Static — the plane's orientation
+ *  relative to the equatorial frame doesn't meaningfully change on any
+ *  human timescale. */
+const MILKY_WAY_RADEC: { ra: number; dec: number }[] = (() => {
+  // Unit vector toward the galactic center, and toward the pole — together
+  // they define the plane; a third axis completes an orthonormal frame we
+  // can sweep longitude around.
+  const toVec = (ra: number, dec: number): [number, number, number] => [
+    Math.cos(dec) * Math.cos(ra),
+    Math.cos(dec) * Math.sin(ra),
+    Math.sin(dec),
+  ];
+  const pole = toVec(GAL_POLE_RA, GAL_POLE_DEC);
+  const center = toVec(GAL_CENTER_RA, GAL_CENTER_DEC);
+  // Gram-Schmidt: center' = center - (center·pole)pole, then normalize.
+  const dot = center[0] * pole[0] + center[1] * pole[1] + center[2] * pole[2];
+  const cPrime: [number, number, number] = [
+    center[0] - dot * pole[0],
+    center[1] - dot * pole[1],
+    center[2] - dot * pole[2],
+  ];
+  const cLen = Math.hypot(cPrime[0], cPrime[1], cPrime[2]);
+  const cHat: [number, number, number] = [cPrime[0] / cLen, cPrime[1] / cLen, cPrime[2] / cLen];
+  // Third axis = pole × cHat, completing a right-handed frame in the plane.
+  const third: [number, number, number] = [
+    pole[1] * cHat[2] - pole[2] * cHat[1],
+    pole[2] * cHat[0] - pole[0] * cHat[2],
+    pole[0] * cHat[1] - pole[1] * cHat[0],
+  ];
+  const pts: { ra: number; dec: number }[] = [];
+  for (let lDeg = 0; lDeg < 360; lDeg += 2) {
+    const l = lDeg * DEG;
+    const x = cHat[0] * Math.cos(l) + third[0] * Math.sin(l);
+    const y = cHat[1] * Math.cos(l) + third[1] * Math.sin(l);
+    const z = cHat[2] * Math.cos(l) + third[2] * Math.sin(l);
+    const dec = Math.asin(Math.max(-1, Math.min(1, z))) * R2D;
+    const ra = norm360(Math.atan2(y, x) * R2D);
+    pts.push({ ra, dec });
+  }
+  return pts;
+})();
 
 /** Horizontal coords of a fixed star from its RA/Dec and the local sidereal time. */
 function starAltAz(raDeg: number, decDeg: number, lstHours: number, latDeg: number) {
@@ -107,9 +216,231 @@ function getSatrec(tle: Tle): satelliteNS.SatRec | null {
   return rec;
 }
 
+// --- Comets: two-body Keplerian propagation from JPL SBDB orbital elements ---
+
+const GAUSS_K = 0.01720209895; // Gaussian gravitational constant, AU^1.5/day
+const J2000_JD = 2451545.0;
+const OBLIQUITY_J2000 = 23.4392911 * DEG;
+
+/** Solve Kepler's equation M = E - e sin E for E (elliptical case), Newton's method. */
+function solveKeplerElliptic(M: number, e: number): number {
+  let E = e < 0.8 ? M : Math.PI;
+  for (let i = 0; i < 30; i++) {
+    const dE = (E - e * Math.sin(E) - M) / (1 - e * Math.cos(E));
+    E -= dE;
+    if (Math.abs(dE) < 1e-10) break;
+  }
+  return E;
+}
+
+/** Solve the hyperbolic Kepler equation M = e sinh F - F (e > 1), Newton's method. */
+function solveKeplerHyperbolic(M: number, e: number): number {
+  let F = Math.log((2 * Math.abs(M)) / e + 1.8);
+  if (M < 0) F = -F;
+  for (let i = 0; i < 50; i++) {
+    const dF = (e * Math.sinh(F) - F - M) / (e * Math.cosh(F) - 1);
+    F -= dF;
+    if (Math.abs(dF) < 1e-10) break;
+  }
+  return F;
+}
+
+/**
+ * Heliocentric ecliptic position (AU, J2000) of a comet at `date`, from its
+ * osculating elements. Handles both elliptical (e<1) and near-parabolic /
+ * hyperbolic (e>=1, common for long-period comets) orbits.
+ */
+function cometHeliocentricEcliptic(c: CometElements, date: Date): [number, number, number] {
+  const jd =
+    J2000_JD + (date.getTime() - Date.UTC(2000, 0, 1, 12, 0, 0)) / 86400000;
+  const dt = jd - c.tp; // days since perihelion passage
+  const iR = c.i * DEG;
+  const wR = c.w * DEG;
+  const omR = c.om * DEG;
+
+  let xOrb: number, yOrb: number;
+  if (c.e < 1) {
+    const a = c.q / (1 - c.e);
+    const n = GAUSS_K / Math.sqrt(a ** 3); // mean motion, rad/day
+    const M = n * dt;
+    const E = solveKeplerElliptic(((M % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI), c.e);
+    xOrb = a * (Math.cos(E) - c.e);
+    yOrb = a * Math.sqrt(1 - c.e * c.e) * Math.sin(E);
+  } else {
+    const a = c.q / (c.e - 1); // semi-major axis magnitude for e>1
+    const n = GAUSS_K / Math.sqrt(a ** 3);
+    const M = n * dt;
+    const F = solveKeplerHyperbolic(M, c.e);
+    xOrb = a * (c.e - Math.cosh(F));
+    yOrb = -a * Math.sqrt(c.e * c.e - 1) * Math.sinh(F);
+  }
+
+  // Rotate from the orbital plane into J2000 ecliptic coordinates.
+  const cosW = Math.cos(wR), sinW = Math.sin(wR);
+  const cosOm = Math.cos(omR), sinOm = Math.sin(omR);
+  const cosI = Math.cos(iR), sinI = Math.sin(iR);
+
+  const xEcl =
+    (cosOm * cosW - sinOm * sinW * cosI) * xOrb +
+    (-cosOm * sinW - sinOm * cosW * cosI) * yOrb;
+  const yEcl =
+    (sinOm * cosW + cosOm * sinW * cosI) * xOrb +
+    (-sinOm * sinW + cosOm * cosW * cosI) * yOrb;
+  const zEcl = sinW * sinI * xOrb + cosW * sinI * yOrb;
+
+  return [xEcl, yEcl, zEcl];
+}
+
+/** Standard comet apparent-magnitude law: m = M1 + 5 log10(delta) + K1 log10(r). */
+function cometApparentMag(c: CometElements, rAu: number, deltaAu: number): number | undefined {
+  if (c.m1 == null || c.k1 == null) return undefined;
+  return c.m1 + 5 * Math.log10(deltaAu) + c.k1 * Math.log10(rAu);
+}
+
+/** Comet az/alt + estimated apparent magnitude, or null if elements are unusable. */
+function cometAltAz(
+  c: CometElements,
+  date: Date,
+  observer: AstronomyNS.Observer,
+): { az: number; alt: number; mag?: number } | null {
+  const [xh, yh, zh] = cometHeliocentricEcliptic(c, date);
+  const rAu = Math.sqrt(xh * xh + yh * yh + zh * zh);
+  if (!Number.isFinite(rAu) || rAu <= 0) return null;
+
+  // Ecliptic -> equatorial (J2000), then Earth-relative (geocentric) vector.
+  const cosEps = Math.cos(OBLIQUITY_J2000), sinEps = Math.sin(OBLIQUITY_J2000);
+  const xEq = xh;
+  const yEq = yh * cosEps - zh * sinEps;
+  const zEq = yh * sinEps + zh * cosEps;
+
+  const earth = Astronomy.HelioVector(Astronomy.Body.Earth, date);
+  const gx = xEq - earth.x;
+  const gy = yEq - earth.y;
+  const gz = zEq - earth.z;
+  const deltaAu = Math.sqrt(gx * gx + gy * gy + gz * gz);
+  if (!Number.isFinite(deltaAu) || deltaAu <= 0) return null;
+
+  const vec = new Astronomy.Vector(gx, gy, gz, Astronomy.MakeTime(date));
+  const eq = Astronomy.EquatorFromVector(vec);
+  const hor = Astronomy.Horizon(date, observer, eq.ra, eq.dec, "normal");
+  return {
+    az: hor.azimuth,
+    alt: hor.altitude,
+    mag: cometApparentMag(c, rAu, deltaAu),
+  };
+}
+
+// --- Meteors: simulated streaks near active shower radiants ---
+
+/** How often (ms, expected interval at ZHR=100) a streak spawns near an active
+ *  radiant. Actual spawn is probabilistic per computeSky tick, scaled by the
+ *  shower's current activity fraction and ZHR. */
+const METEOR_BASE_INTERVAL_MS = 45_000;
+
+let meteorRngSeed = Date.now() % 2147483647;
+function meteorRandom(): number {
+  meteorRngSeed = (meteorRngSeed * 16807) % 2147483647;
+  return (meteorRngSeed - 1) / 2147483646;
+}
+
+interface LiveMeteor {
+  id: string;
+  shower: string;
+  az0: number;
+  alt0: number;
+  headingDeg: number; // direction of travel across the sky, degrees
+  spawnedAt: number; // ms epoch
+  lifeMs: number;
+}
+
+const liveMeteors: LiveMeteor[] = [];
+let lastMeteorSpawnCheck = 0;
+
+/** Radiant az/alt for a shower right now (may be below the horizon). */
+function radiantAltAz(shower: MeteorShower, date: Date, latDeg: number, lonDeg: number) {
+  const lst = Astronomy.SiderealTime(date) + lonDeg / 15;
+  return starAltAz(shower.ra, shower.dec, lst, latDeg);
+}
+
+function stepMeteors(
+  date: Date,
+  latDeg: number,
+  lonDeg: number,
+  nowMs: number,
+): { streaks: MeteorStreak[]; active: { name: string; fraction: number }[] } {
+  const showers = activeShowers(date);
+
+  // Spawn check: at most once per second of wall-clock, so cadence doesn't
+  // depend on render frame rate.
+  if (nowMs - lastMeteorSpawnCheck > 1000) {
+    const elapsedFrac = (nowMs - lastMeteorSpawnCheck) / METEOR_BASE_INTERVAL_MS;
+    lastMeteorSpawnCheck = nowMs;
+    for (const { shower, fraction } of showers) {
+      const radiant = radiantAltAz(shower, date, latDeg, lonDeg);
+      if (radiant.alt < -5) continue; // radiant well below horizon: skip
+      const rate = fraction * (shower.zhr / 100);
+      if (meteorRandom() < rate * elapsedFrac) {
+        // Streak starts a random offset from the radiant and travels outward.
+        const spreadDeg = 25 + meteorRandom() * 35;
+        const bearingFromRadiant = meteorRandom() * 360;
+        const startAz = norm360(radiant.az + Math.sin(bearingFromRadiant * DEG) * spreadDeg);
+        const startAlt = Math.max(2, radiant.alt + Math.cos(bearingFromRadiant * DEG) * spreadDeg);
+        liveMeteors.push({
+          id: `${shower.id}-${nowMs}-${Math.floor(meteorRandom() * 1e6)}`,
+          shower: shower.name,
+          az0: startAz,
+          alt0: startAlt,
+          headingDeg: bearingFromRadiant, // radial outward from the radiant
+          spawnedAt: nowMs,
+          lifeMs: 220 + meteorRandom() * 260, // a real meteor streak is brief
+        });
+      }
+    }
+  }
+
+  const streaks: MeteorStreak[] = [];
+  for (let idx = liveMeteors.length - 1; idx >= 0; idx--) {
+    const m = liveMeteors[idx];
+    const age = nowMs - m.spawnedAt;
+    if (age > m.lifeMs) {
+      liveMeteors.splice(idx, 1);
+      continue;
+    }
+    const t0 = age / m.lifeMs;
+    const t1 = Math.min(1, (age + 16) / m.lifeMs); // ~one frame's travel
+    const travelDeg = 18; // angular length traversed over the full streak life
+    const d0 = t0 * travelDeg;
+    const d1 = t1 * travelDeg;
+    const rad = m.headingDeg * DEG;
+    streaks.push({
+      id: m.id,
+      shower: m.shower,
+      az1: norm360(m.az0 + Math.sin(rad) * d0),
+      alt1: m.alt0 + Math.cos(rad) * d0,
+      az2: norm360(m.az0 + Math.sin(rad) * d1),
+      alt2: m.alt0 + Math.cos(rad) * d1,
+      alpha: 1 - t0,
+    });
+  }
+
+  return {
+    streaks,
+    active: showers.map((s) => ({ name: s.shower.name, fraction: s.fraction })),
+  };
+}
+
 export function computeSky(date: Date, latDeg: number, lonDeg: number, o: SkyOpts): Sky {
   const observer = new Astronomy.Observer(latDeg, lonDeg, 0);
-  const sky: Sky = { stars: [], sats: [], planets: [] };
+  const sky: Sky = {
+    stars: [],
+    deepStars: [],
+    sats: [],
+    planets: [],
+    meteors: [],
+    comets: [],
+    milkyWay: [],
+    activeShowers: [],
+  };
 
   if (o.sun) {
     const { az, alt } = bodyAltAz(Astronomy.Body.Sun, date, observer);
@@ -121,13 +452,54 @@ export function computeSky(date: Date, latDeg: number, lonDeg: number, o: SkyOpt
     const phase = Astronomy.MoonPhase(date); // 0..360, 180 = full
     sky.moon = { kind: "moon", az, alt, illum: illum.phase_fraction, waning: phase > 180 };
   }
-  if (o.stars) {
+  if (o.stars || o.deepStars) {
     const lst = Astronomy.SiderealTime(date) + lonDeg / 15; // local sidereal hours
-    for (const s of STARS) {
-      if (s.mag > o.magLimit) continue;
-      const { az, alt } = starAltAz(s.ra, s.dec, lst, latDeg);
-      if (alt < -2) continue; // below horizon
-      sky.stars.push({ kind: "star", id: s.id, name: s.name, az, alt, mag: s.mag });
+    if (o.stars) {
+      for (const s of STARS) {
+        if (s.mag > o.magLimit) continue;
+        const { az, alt } = starAltAz(s.ra, s.dec, lst, latDeg);
+        if (alt < -2) continue; // below horizon
+        sky.stars.push({ kind: "star", id: s.id, name: s.name, az, alt, mag: s.mag });
+      }
+    }
+    if (o.deepStars) {
+      for (const s of DEEP_STARS) {
+        if (s.mag > o.deepStarMagLimit) continue;
+        const { az, alt } = starAltAz(s.ra, s.dec, lst, latDeg);
+        if (alt < -2) continue; // below horizon
+        sky.deepStars.push({ kind: "deepstar", id: s.id, az, alt, mag: s.mag });
+      }
+    }
+  }
+  if (o.milkyWay) {
+    const lst = Astronomy.SiderealTime(date) + lonDeg / 15;
+    for (const { ra, dec } of MILKY_WAY_RADEC) {
+      const { az, alt } = starAltAz(ra, dec, lst, latDeg);
+      sky.milkyWay.push({ az, alt });
+    }
+  }
+  if (o.meteors) {
+    const { streaks, active } = stepMeteors(date, latDeg, lonDeg, Date.now());
+    sky.meteors = streaks;
+    sky.activeShowers = active;
+  }
+  if (o.showComets && o.comets.length) {
+    for (const c of o.comets) {
+      const hit = cometAltAz(c, date, observer);
+      if (!hit || hit.alt < -2) continue;
+      // No brightness parameters (m1/k1) on record for this comet: treat as
+      // unknown-and-faint rather than assume it's visible. Roughly half of
+      // JPL's comet catalog lacks these, mostly long-dead/never-recovered
+      // ones with no modern photometry — showing them all unfiltered is
+      // how thousands of long-extinct comet designations end up drawn.
+      if (hit.mag == null || hit.mag > o.cometMagLimit) continue;
+      sky.comets.push({
+        kind: "comet",
+        name: c.name.replace(/^\s*\d*[A-Z]?\/?/, "").trim() || c.name.trim(),
+        az: norm360(hit.az),
+        alt: hit.alt,
+        mag: hit.mag,
+      });
     }
   }
   if (o.satellites && o.tles.length) {

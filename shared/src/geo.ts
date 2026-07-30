@@ -187,6 +187,88 @@ export function projectSkyPoint(
 }
 
 /**
+ * Angular separation between two sky points (degrees), spherical law of
+ * cosines. Used to re-center the sky dome on a pan target and to decide
+ * what's "near" for satellite label decluttering.
+ */
+export function angularSeparationDeg(
+  az1: number,
+  alt1: number,
+  az2: number,
+  alt2: number,
+): number {
+  const a1 = alt1 * DEG, a2 = alt2 * DEG;
+  const dAz = (az2 - az1) * DEG;
+  const cosD = Math.sin(a1) * Math.sin(a2) + Math.cos(a1) * Math.cos(a2) * Math.cos(dAz);
+  return Math.acos(Math.max(-1, Math.min(1, cosD))) * (180 / Math.PI);
+}
+
+/**
+ * Re-center + zoom a sky point around a pan target, for the zoomable sky
+ * dome. `panAz`/`panAlt` become the new center of the field; `zoom` scales
+ * radius outward from there (1 = whole-hemisphere view, same as
+ * projectSkyPoint; >1 magnifies the region around the pan target).
+ *
+ * Rotates the point into a frame where the pan target sits at the zenith
+ * (bearing/distance from the pan target, via the spherical law of cosines +
+ * four-quadrant bearing), so panning to any sky point re-centers correctly
+ * near the horizon too, not just near zenith.
+ */
+export function projectSkyPointZoomed(
+  azDeg: number,
+  elevDeg: number,
+  panAz: number,
+  panAlt: number,
+  zoom: number,
+  o: ProjectOpts,
+  horizonRadius: number,
+): Point {
+  if (zoom <= 1 && panAz === 0 && panAlt === 90) {
+    return projectSkyPoint(azDeg, elevDeg, o, horizonRadius);
+  }
+  const distDeg = angularSeparationDeg(panAz, panAlt, azDeg, elevDeg);
+  // Bearing from the pan target to this point, so it maps to the correct
+  // direction outward from the new center.
+  const panAltR = panAlt * DEG, elevR = elevDeg * DEG;
+  const dAz = (azDeg - panAz) * DEG;
+  const y = Math.sin(dAz) * Math.cos(elevR);
+  const x =
+    Math.cos(panAltR) * Math.sin(elevR) -
+    Math.sin(panAltR) * Math.cos(elevR) * Math.cos(dAz);
+  const bearing = Math.atan2(y, x);
+
+  // Re-expressed as az/alt around a zenith-centered field, then zoomed.
+  // Clamp to the zoomed field's own horizon (alt >= 0): distDeg*zoom can
+  // exceed 90 for anything outside the zoomed view, and left unclamped that
+  // pushes `alt` deeply negative — skyElevToRadius clamps internally, but a
+  // point far off one edge of the zoomed view and a point far off the
+  // OPPOSITE edge both collapse toward the same clamped radius, which turns
+  // a curve/line that legitimately exits the zoomed field into a jump
+  // straight across the canvas instead of just running off the edge.
+  const alt = Math.max(0, 90 - distDeg * zoom);
+  const az = bearing * (180 / Math.PI);
+  const r = skyElevToRadius(alt, horizonRadius);
+  const a = az * DEG;
+  return project({ east: Math.sin(a) * r, north: Math.cos(a) * r }, o);
+}
+
+/** Whether a sky point at (az, elev) falls within the zoomed field's own
+ *  horizon around (panAz, panAlt) — i.e. projectSkyPointZoomed places it at
+ *  a real position rather than clamped to the field's edge. Callers drawing
+ *  multi-point paths (destination arcs, the Milky Way band) should break
+ *  the path rather than connect a real point to a clamped one. */
+export function inZoomedSkyField(
+  azDeg: number,
+  elevDeg: number,
+  panAz: number,
+  panAlt: number,
+  zoom: number,
+): boolean {
+  if (zoom <= 1) return true;
+  return angularSeparationDeg(panAz, panAlt, azDeg, elevDeg) * zoom <= 90;
+}
+
+/**
  * Subtle slant-range size scale for sky mode — nearer / lower aircraft read
  * slightly larger, matching outdoor perspective. Clamped for stability.
  */
