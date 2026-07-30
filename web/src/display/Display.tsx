@@ -4,6 +4,7 @@ import { DEFAULT_CONFIG, formatDistance } from "@shared/index.js";
 import { useStream } from "../lib/useStream.js";
 import { useAmbientMode, kioskRequested } from "../lib/useAmbientMode.js";
 import { Renderer } from "./renderer.js";
+import { QuickSettings } from "./QuickSettings.js";
 
 const THEMES: Theme[] = ["ambient", "telemetry", "focus"];
 
@@ -182,7 +183,7 @@ export function Display() {
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const IDLE_MS = 2500;
+    const IDLE_MS = 2000;
     let idleTimer: ReturnType<typeof setTimeout>;
     const onActivity = () => {
       canvas.classList.remove("cursor-idle");
@@ -214,6 +215,7 @@ export function Display() {
         </div>
       )}
       {!state.connected && <div className="reconnect">connecting…</div>}
+      {cfg && <QuickSettings cfg={cfg} patch={conn.patchConfig.bind(conn)} />}
       {hover && (
         <div className="hover-tip" style={{ left: hover.x, top: hover.y }}>
           {hover.label}

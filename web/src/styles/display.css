@@ -100,6 +100,81 @@ body,
 .ambient-warn {
   color: #e0a23d;
 }
+.quick-settings {
+  position: fixed;
+  top: 12px;
+  right: 12px;
+  z-index: 10;
+}
+.quick-settings-badge {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  background: rgba(10, 12, 16, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 7px;
+  cursor: pointer;
+  opacity: 0.16; /* stay out of the way; reveal on hover, like ambient-toggle */
+  transition: opacity 0.2s ease;
+}
+.quick-settings:hover .quick-settings-badge,
+.quick-settings-badge:focus-visible {
+  opacity: 0.9;
+  outline: none;
+}
+.quick-settings-panel {
+  position: absolute;
+  top: 36px;
+  right: 0;
+  min-width: 220px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font: 12px "JetBrains Mono", ui-monospace, monospace;
+  color: #e8ecff;
+  background: rgba(10, 12, 16, 0.82);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  padding: 10px 12px;
+  backdrop-filter: blur(3px);
+}
+.quick-settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  cursor: pointer;
+}
+.quick-settings-row input[type="checkbox"] {
+  accent-color: #8cffd6;
+  cursor: pointer;
+}
+.quick-settings-reset {
+  margin-top: 2px;
+  font: inherit;
+  color: #c9cdd6;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 5px;
+  padding: 5px 8px;
+  cursor: pointer;
+  text-align: left;
+}
+.quick-settings-reset:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+.quick-settings-more {
+  margin-top: 2px;
+  color: #8cffd6;
+  text-decoration: none;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  padding-top: 8px;
+}
+.quick-settings-more:hover {
+  text-decoration: underline;
+}
 .hover-tip {
   position: absolute;
   transform: translate(14px, -50%);
