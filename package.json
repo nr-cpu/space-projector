@@ -2,7 +2,7 @@
   "name": "skylight",
   "version": "0.1.0",
   "private": true,
-  "description": "Skylight — project the aircraft passing overhead onto your ceiling, in real time, from an RTL-SDR.",
+  "description": "space.projector — fork of cpaczek/skylight, projecting overhead aircraft and a full-sky satellite view onto your ceiling in real time.",
   "type": "module",
   "packageManager": "pnpm@10.28.2",
   "scripts": {

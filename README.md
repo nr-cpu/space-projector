@@ -1,7 +1,11 @@
-<h1 align="center">Skylight</h1>
+<h1 align="center">space.projector</h1>
 
 <p align="center">
   <em>Project the aircraft passing overhead onto your ceiling, in real time - an X-ray through the roof.</em>
+</p>
+
+<p align="center">
+  <sub>A fork of <a href="https://github.com/cpaczek/skylight">cpaczek/skylight</a>, extended to zoom out into a full-sky satellite view with names/IDs for thousands of tracked objects. All credit for the original ADS-B ceiling projector concept and implementation goes to <a href="https://github.com/cpaczek">cpaczek</a>. See <a href="LICENSE">LICENSE</a> (MIT).</sub>
 </p>
 
 <p align="center">
