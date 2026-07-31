@@ -320,7 +320,13 @@ export function Display() {
       />
       {showOrbital && (
         <div className="orbital-overlay">
-          <OrbitalView cfg={cfg} tles={tles} aircraft={state.aircraft} pullback={pullback} />
+          <OrbitalView
+            cfg={cfg}
+            tles={tles}
+            aircraft={state.aircraft}
+            pullback={pullback}
+            onHover={setHover}
+          />
         </div>
       )}
       {cfg.showHud && (

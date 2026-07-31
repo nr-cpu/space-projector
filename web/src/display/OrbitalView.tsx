@@ -19,6 +19,10 @@ interface OrbitalViewProps {
    *  past the dome's 1x floor; eases visually in the camera position, not a
    *  hard cut. */
   pullback: number;
+  /** Fires as the pointer moves: screen-space coords + label when hovering
+   *  the observer marker, null otherwise (mirrors the ground dome's hover
+   *  tooltip contract in Display.tsx). */
+  onHover?: (hover: { x: number; y: number; label: string } | null) => void;
 }
 
 /** Scene-unit scale: 1 scene unit = 1000 km, so the whole Earth+satellite
@@ -38,7 +42,7 @@ interface SceneState {
   raf: number;
 }
 
-export function OrbitalView({ cfg, tles, aircraft, pullback }: OrbitalViewProps) {
+export function OrbitalView({ cfg, tles, aircraft, pullback, onHover }: OrbitalViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const stateRef = useRef<SceneState | null>(null);
 
@@ -50,6 +54,12 @@ export function OrbitalView({ cfg, tles, aircraft, pullback }: OrbitalViewProps)
   aircraftRef.current = aircraft;
   const pullbackRef = useRef(pullback);
   pullbackRef.current = pullback;
+  const onHoverRef = useRef(onHover);
+  onHoverRef.current = onHover;
+  // Observer marker's current screen-space position (px, container-relative),
+  // updated every frame from its 3D position — the hit test compares the
+  // pointer against this rather than doing a full raycast for one small dot.
+  const markerScreenRef = useRef<{ x: number; y: number } | null>(null);
 
   // Scene setup — once.
   useEffect(() => {
@@ -111,9 +121,10 @@ export function OrbitalView({ cfg, tles, aircraft, pullback }: OrbitalViewProps)
 
     // A small marker at the viewer's own ground location, so the transition
     // from "standing here looking up" to "looking down at the globe" has a
-    // visible anchor.
+    // visible anchor. Sized at 25% of the original — full-size read as an
+    // oversized city-marker blob rather than a precise location pin.
     const observerMarker = new THREE.Mesh(
-      new THREE.SphereGeometry(earthRadius * 0.01, 12, 12),
+      new THREE.SphereGeometry(earthRadius * 0.0025, 12, 12),
       new THREE.MeshBasicMaterial({ color: 0x8cffd6 }),
     );
     scene.add(observerMarker);
@@ -157,13 +168,51 @@ export function OrbitalView({ cfg, tles, aircraft, pullback }: OrbitalViewProps)
 
       positionCamera(camera, obsScene, earthRadius, pullbackRef.current);
 
+      // Project the marker to screen space for hover hit-testing. Also check
+      // it's actually facing the camera (not on the globe's far side) —
+      // otherwise the marker would be "hoverable" straight through the Earth.
+      const toMarker = obsScene.clone().normalize();
+      const toCamera = camera.position.clone().normalize();
+      const facingCamera = toMarker.dot(toCamera) > 0.1;
+      if (facingCamera) {
+        const proj = obsScene.clone().project(camera);
+        const w = container.clientWidth;
+        const h = container.clientHeight;
+        markerScreenRef.current = {
+          x: ((proj.x + 1) / 2) * w,
+          y: ((1 - proj.y) / 2) * h,
+        };
+      } else {
+        markerScreenRef.current = null;
+      }
+
       renderer.render(scene, camera);
     };
     loop();
 
+    const HOVER_RADIUS_PX = 14;
+    const onPointerMove = (e: PointerEvent) => {
+      const m = markerScreenRef.current;
+      const rect = container.getBoundingClientRect();
+      const px = e.clientX - rect.left;
+      const py = e.clientY - rect.top;
+      if (m && Math.hypot(px - m.x, py - m.y) <= HOVER_RADIUS_PX) {
+        const ap = cfgRef.current.airport;
+        const label = ap ? `${ap.icao}\n${ap.fullName ?? ap.name}` : "Observer";
+        onHoverRef.current?.({ x: m.x, y: m.y, label });
+      } else {
+        onHoverRef.current?.(null);
+      }
+    };
+    const onPointerLeave = () => onHoverRef.current?.(null);
+    container.addEventListener("pointermove", onPointerMove);
+    container.addEventListener("pointerleave", onPointerLeave);
+
     return () => {
       cancelAnimationFrame(stateRef.current!.raf);
       ro.disconnect();
+      container.removeEventListener("pointermove", onPointerMove);
+      container.removeEventListener("pointerleave", onPointerLeave);
       renderer.dispose();
       satGeom.dispose();
       acGeom.dispose();

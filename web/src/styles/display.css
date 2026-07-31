@@ -51,6 +51,11 @@ body,
   inset: 0;
   width: 100%;
   height: 100%;
+  /* Overrides the overlay's pointer-events:none — needed for the observer
+     marker's hover tooltip. Safe to re-enable here: the ground canvas
+     underneath already sets pointer-events:none on itself the instant
+     showOrbital flips, so there's nothing left for this to steal focus from. */
+  pointer-events: auto;
 }
 .orbital-view canvas {
   display: block;
