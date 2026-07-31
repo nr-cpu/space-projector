@@ -30,7 +30,6 @@ import {
   horizonRadiusM,
   groundToSkyAngles,
   projectAircraft,
-  projectSkyPoint,
   projectSkyPointZoomed,
   angularSeparationDeg,
   inZoomedSkyField,
@@ -80,12 +79,6 @@ function starDrawSize(mag: number): number {
 
 /** Gap between sky-object edge and label anchor, px. */
 const SKY_LABEL_GAP = 4;
-
-/** Radius of each overlapping glow blob composing the Milky Way band, px.
- *  Scales with screen size elsewhere would be nicer, but a fixed value tuned
- *  for a ~1080p display keeps the drawMilkyWay loop simple; revisit if the
- *  band reads too thin/thick on very different resolutions. */
-const MILKY_WAY_BAND_PX = 90;
 
 interface SkyLabelEntry {
   p: Point;
@@ -446,6 +439,7 @@ export class Renderer {
       proj,
       this.horizonM(cfg),
       tr ? this.fallbackAz(tr) : undefined,
+      this.frameView,
     );
   }
 
@@ -519,16 +513,40 @@ export class Renderer {
     // (zoom=1) state — don't fight a manual zoom/pan left in place.
     if (cfg.skyZoom > 1.01) return real;
 
+    // Don't even attempt a drift target until there's a real catalog loaded —
+    // right after boot (or mid-refresh-throttle), this.sky.sats can be
+    // near-empty for a while; picking a target then locks onto whatever
+    // lone satellite happens to exist and stays there, framed at a "wide"
+    // fallback zoom that's still visually empty because there's nothing
+    // nearby to show. Below this floor, just hold the resting full-sky view.
+    const MIN_SATS_FOR_DRIFT = 50;
+    if (this.sky.sats.length < MIN_SATS_FOR_DRIFT) return real;
+
     if (this.driftZoom == null || now > this.driftHoldUntil) {
-      // Pick a new target: prefer a satellite in a pleasant 25-65° elevation
-      // band (visible, moving at a watchable rate, not near the horizon
-      // haze or the fast-moving zenith point); fall back to the highest
-      // available if none are in that band.
-      const candidates = this.sky.sats;
-      let target = candidates.find((s) => s.alt >= 25 && s.alt <= 65);
-      if (!target && candidates.length) {
-        target = candidates.reduce((a, b) => (b.alt > a.alt ? b : a));
+      // Pick a new target from a genuinely dense neighborhood, not just the
+      // first satellite in the elevation band — the first-match approach
+      // could lock onto an isolated satellite with few/no neighbors nearby,
+      // which still looks empty even at the widest drift zoom because
+      // there's nothing else around it to see.
+      const band = this.sky.sats.filter((s) => s.alt >= 25 && s.alt <= 65);
+      const pool = band.length ? band : this.sky.sats;
+      let best = pool[0];
+      let bestCount = -1;
+      // Sampling every few entries is plenty at catalog scale (thousands of
+      // sats) and keeps target-pick cheap — this runs once per DRIFT_HOLD_MS.
+      const step = Math.max(1, Math.floor(pool.length / 60));
+      for (let i = 0; i < pool.length; i += step) {
+        const s = pool[i];
+        let count = 0;
+        for (const o of pool) {
+          if (angularSeparationDeg(s.az, s.alt, o.az, o.alt) <= 15) count++;
+        }
+        if (count > bestCount) {
+          bestCount = count;
+          best = s;
+        }
       }
+      const target = best;
       if (target) {
         this.driftTargetAz = target.az;
         this.driftTargetAlt = target.alt;
@@ -790,8 +808,14 @@ export class Renderer {
         /* older browsers */
       }
       for (const [label, deg] of [["N", 0], ["E", 90], ["S", 180], ["W", 270]] as [string, number][]) {
+        // In sky mode these must honor the current zoom/pan (this.frameView)
+        // the same way every other sky-drawn object does — projectSkyPoint
+        // alone ignores it and leaves the compass letters pinned to their
+        // zoom=1 position while everything else moves, which is how two
+        // labels end up visually overlapping at other pan angles.
+        if (skyMode && this.frameView.zoom > 1 && !this.inSkyView(deg, 1.5, cfg)) continue;
         const p = skyMode
-          ? projectSkyPoint(deg, 1.5, proj, hM)
+          ? this.projectSky(deg, 1.5, cfg, proj)
           : project(
               {
                 east: Math.sin((deg * Math.PI) / 180) * 1e6,
@@ -1252,31 +1276,35 @@ export class Renderer {
    *  diffuse light rather than individual points. Orientation uses the
    *  galactic-pole coordinates (J2000: RA 192.85°, Dec 27.13°) rotated into
    *  the local sky via the same sidereal-time math as the star field. */
+  /** Real Milky Way photos read as a mottled texture of countless faint
+   *  unresolved stars (warmer/denser toward the galactic center), not a
+   *  smooth painted shape — every shape-based attempt here (overlapping
+   *  blobs, a stroked path, with/without blur) read as a flat, hard-edged
+   *  band regardless of alpha tuning, because a uniform fill or stroke has
+   *  no texture to give it that photographic softness. Drawing it as a
+   *  dense star scatter (like showDeepStars, just denser + warm-toned)
+   *  sidesteps the problem entirely: each point is faint and small, and the
+   *  band emerges from their density, the same way it does in a real photo. */
   private drawMilkyWay(cfg: Config, proj: ProjOpts, b: number): void {
     const ctx = this.ctx;
     const opacity = cfg.milkyWayOpacity * b;
     if (opacity <= 0.01 || !this.sky.milkyWay.length) return;
-    const pts: Point[] = [];
-    for (const { az, alt } of this.sky.milkyWay) {
-      if (alt < -15) continue;
-      const a = Math.max(alt, -2);
-      if (!inZoomedSkyField(az, a, this.frameView.panAz, this.frameView.panAlt, this.frameView.zoom)) continue;
-      pts.push(this.projectSky(az, a, cfg, proj));
-    }
-    if (pts.length < 2) return;
-    ctx.save();
-    ctx.globalCompositeOperation = "lighter";
-    for (let i = 0; i < pts.length; i++) {
-      const p = pts[i];
-      const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, MILKY_WAY_BAND_PX);
-      g.addColorStop(0, `rgba(180,190,215,${0.05 * opacity})`);
-      g.addColorStop(1, "rgba(180,190,215,0)");
-      ctx.fillStyle = g;
+    for (const s of this.sky.milkyWay) {
+      if (!this.inSkyView(s.az, s.alt, cfg)) continue;
+      const p = this.projectSky(s.az, s.alt, cfg, proj);
+      const size = Math.max(0.35, 1.3 - s.mag * 0.18);
+      const a = clamp01((7.5 - s.mag) / 7.5) * b * opacity * 0.8;
+      if (a <= 0.015) continue;
+      // Warm (dust/bulge glow, rust-gold) blends to neutral blue-white
+      // (spiral-arm sections) via s.warm, matching real Milky Way color.
+      const r = 200 + s.warm * 40;
+      const g = 195 + s.warm * 10;
+      const bl = 210 - s.warm * 90;
       ctx.beginPath();
-      ctx.arc(p.x, p.y, MILKY_WAY_BAND_PX, 0, Math.PI * 2);
+      ctx.arc(p.x, p.y, size, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(${r | 0},${g | 0},${bl | 0},${a})`;
       ctx.fill();
     }
-    ctx.restore();
   }
 
   /** Only label a non-ISS satellite when label density control allows it:

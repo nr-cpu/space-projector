@@ -22,6 +22,12 @@ export function Display() {
   // shared config the way skyZoom/skyPanAz/skyPanAlt are.
   const [pullback, setPullback] = useState(0);
   const pullbackRef = useRef(0);
+  // Which view is actually showing right now (hard tipping point, with
+  // hysteresis — see the render below). Read by the ground-canvas pointer
+  // handlers so hover hit-testing/tooltips stop firing the instant the
+  // orbital view takes over, even though the canvas element (and its
+  // listeners) stay mounted underneath.
+  const orbitalActiveRef = useRef(false);
   const [tles, setTles] = useState<Tle[]>([]);
 
   // Keep the latest config in a ref so the RAF loop always reads fresh values.
@@ -203,6 +209,11 @@ export function Display() {
       canvas.setPointerCapture(e.pointerId);
     };
     const onPointerMove = (e: PointerEvent) => {
+      // The ground canvas is also pointer-events:none while the orbital view
+      // is showing, so this shouldn't fire then anyway — belt-and-suspenders
+      // against a move event queued right at the transition boundary.
+      if (orbitalActiveRef.current) return;
+
       // Hover hit-test runs regardless of dragging, so the tooltip still
       // updates (or clears, mid-drag) as the pointer crosses objects.
       const rect = canvas.getBoundingClientRect();
@@ -281,12 +292,28 @@ export function Display() {
     };
   }, []);
 
+  // Hard tipping point, not a cross-fade: below it, only the ground dome is
+  // visible/interactive; at or above it, only the orbital view is. Blending
+  // both let the Earth sphere read as translucent (ground stars/satellites
+  // showing through it) and left both layers' hover tooltips live at once.
+  // A touch of hysteresis (different thresholds each direction) stops the
+  // view flickering back and forth if pullback sits right at the boundary.
+  const showOrbital = pullback >= (orbitalActiveRef.current ? 0.12 : 0.18);
+  if (showOrbital !== orbitalActiveRef.current) {
+    orbitalActiveRef.current = showOrbital;
+    if (showOrbital && hover) setHover(null); // no stale ground-view tooltip carried over
+  }
+
   const cfg = state.config;
   return (
     <div className="display-root">
-      <canvas ref={canvasRef} className="display-canvas" />
-      {cfg && pullback > 0 && (
-        <div className="orbital-overlay" style={{ opacity: Math.min(1, pullback * 2.5) }}>
+      <canvas
+        ref={canvasRef}
+        className="display-canvas"
+        style={showOrbital ? { visibility: "hidden", pointerEvents: "none" } : undefined}
+      />
+      {cfg && showOrbital && (
+        <div className="orbital-overlay">
           <OrbitalView cfg={cfg} tles={tles} aircraft={state.aircraft} pullback={pullback} />
         </div>
       )}

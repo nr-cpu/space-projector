@@ -17,11 +17,6 @@
 </p>
 
 <p align="center">
-  <a href="https://skylightceiling.com"><b>🛰️ Get notified when I launch on a crowdfunding platform → skylightceiling.com</b></a>
-  <br><sub>A ready-made kit is coming. Join the waitlist for early access &amp; launch pricing.</sub>
-</p>
-
-<p align="center">
   <img src="docs/skylight.png" alt="Skylight projected on a ceiling: aircraft, trails, SFO runways and the night sky" width="100%">
 </p>
 

@@ -4,7 +4,7 @@
 
 import { describe, expect, it } from "vitest";
 import { DEFAULT_CONFIG, mergeConfig, mergeTrackerConfig } from "../src/config.js";
-import { SFO_AIRPORT } from "../src/airport.js";
+import { DEFAULT_AIRPORT } from "../src/airport.js";
 import { ASTERISMS, CONSTELLATIONS, visibleAsterisms } from "../src/stars.js";
 
 describe("mergeTrackerConfig", () => {
@@ -59,15 +59,15 @@ describe("mergeConfig locationProfiles (#18)", () => {
       ...profile,
       id: "b2",
       name: "KSNA",
-      airport: SFO_AIRPORT,
+      airport: DEFAULT_AIRPORT,
       showAirport: true,
     };
     const saved = mergeConfig(DEFAULT_CONFIG, { locationProfiles: [withRunways] });
-    expect(saved.locationProfiles[0].airport).toEqual(SFO_AIRPORT);
+    expect(saved.locationProfiles[0].airport).toEqual(DEFAULT_AIRPORT);
     expect(saved.locationProfiles[0].showAirport).toBe(true);
     // Survives unrelated patches intact (deep, not by reference contract).
     const after = mergeConfig(saved, { brightness: 0.4 });
-    expect(after.locationProfiles[0].airport?.runways).toEqual(SFO_AIRPORT.runways);
+    expect(after.locationProfiles[0].airport?.runways).toEqual(DEFAULT_AIRPORT.runways);
   });
 });
 

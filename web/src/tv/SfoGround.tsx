@@ -6,7 +6,18 @@
 
 import { useMemo } from "react";
 import type { GroundAircraft } from "@shared/index.js";
-import { DEG, SFO_AIRPORT as SFO } from "@shared/index.js";
+import { DEG } from "@shared/index.js";
+
+/** This panel is always SFO's diagram regardless of the app's configured
+ *  default location (see server/src/sfo-ground.ts) — real KSFO runway
+ *  geometry (OurAirports), independent of shared/src/airport.ts's
+ *  DEFAULT_AIRPORT. */
+const SFO_RUNWAYS: { le: [number, number]; he: [number, number] }[] = [
+  { le: [37.628742, -122.39341], he: [37.613538, -122.35716] },
+  { le: [37.626298, -122.393124], he: [37.61172, -122.358367] },
+  { le: [37.607898, -122.38295], he: [37.626476, -122.37063] },
+  { le: [37.606333, -122.381061], he: [37.627346, -122.367124] },
+];
 
 /** Diagram center: SFO ARP. */
 const LAT0 = 37.6213;
@@ -36,7 +47,7 @@ export function SfoGroundPanel(props: {
   const { ground } = props;
   const runways = useMemo(
     () =>
-      SFO.runways.map((r) => ({
+      SFO_RUNWAYS.map((r) => ({
         a: toXY(r.le[0], r.le[1]),
         b: toXY(r.he[0], r.he[1]),
       })),

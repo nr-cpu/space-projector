@@ -1,6 +1,6 @@
 // TV dashboard — "flight-deck noir". Full-bleed sky camera with a breathing
-// reticle, viewfinder corner brackets, an oversized glass radar, and the
-// skylightceiling.com wordmark built into the frame. Lean-back, no controls.
+// reticle, viewfinder corner brackets, and an oversized glass radar.
+// Lean-back, no controls.
 
 import { useEffect, useMemo, useState } from "react";
 import {

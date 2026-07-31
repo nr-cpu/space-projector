@@ -160,7 +160,10 @@ export function skyAnglesToMeters(angles: SkyAngles, horizonRadius: number): Met
 /**
  * Project an aircraft fix to screen pixels. In sky mode, ground position and
  * altitude are converted to azimuth/elevation on the look-up dome so apparent
- * angular speed matches what you see outdoors.
+ * angular speed matches what you see outdoors. `zoomView`, when given,
+ * re-centers/magnifies the same way the celestial layer's zoom/pan does
+ * (projectSkyPointZoomed) — omit it (or leave zoom at 1) for the unzoomed
+ * legacy behavior other callers (e.g. camera calibration) rely on.
  */
 export function projectAircraft(
   sample: GroundSample,
@@ -168,9 +171,13 @@ export function projectAircraft(
   o: ProjectOpts,
   horizonRadius: number,
   fallbackAz?: number,
+  zoomView?: { panAz: number; panAlt: number; zoom: number },
 ): Point {
   if (mode === "map") return project(sample.m, o);
   const sky = groundToSkyAngles(sample.m, sample.altFt, fallbackAz);
+  if (zoomView && zoomView.zoom > 1) {
+    return projectSkyPointZoomed(sky.az, sky.elev, zoomView.panAz, zoomView.panAlt, zoomView.zoom, o, horizonRadius);
+  }
   return project(skyAnglesToMeters(sky, horizonRadius), o);
 }
 

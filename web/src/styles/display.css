@@ -37,8 +37,10 @@ body,
     crosshair;
 }
 /* Orbital pullback view — fades in over the ground dome canvas as pullback
-   (0..1) increases; pointer-events stay off so scroll/drag on the canvas
-   underneath keep driving the same continuous zoom gesture. */
+   past a hard tipping point (see Display.tsx) — never blended with the
+   ground canvas, which is why pointer-events stay off here too: the
+   ground canvas (hidden, not removed) still owns scroll/drag while this is
+   up, keeping pullback in/out one continuous gesture. */
 .orbital-overlay {
   position: absolute;
   inset: 0;

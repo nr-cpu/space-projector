@@ -12,7 +12,7 @@ import type {
   ViscaUnitScale,
 } from "./camera.js";
 import type { FovPoint } from "./aim.js";
-import { SFO_AIRPORT, type Airport } from "./airport.js";
+import { DEFAULT_AIRPORT, type Airport } from "./airport.js";
 import { CONSTELLATIONS } from "./stars.js";
 
 export type Theme = "ambient" | "telemetry" | "focus";
@@ -372,11 +372,12 @@ export interface Config {
 }
 
 export const DEFAULT_CONFIG: Config = {
-  // Default center: San Francisco International (SFO). Set this to your own
-  // location — ideally where you'll be looking up at the ceiling.
-  centerLat: 37.6213,
-  centerLon: -122.379,
-  locationName: "San Francisco International",
+  // Default center: Spirit of St. Louis Airport (KSUS), Chesterfield, MO.
+  // Set this to your own location — ideally where you'll be looking up at
+  // the ceiling.
+  centerLat: 38.662102,
+  centerLon: -90.652,
+  locationName: "Spirit of St Louis Airport",
   radiusMiles: 3,
   locationProfiles: [],
 
@@ -443,7 +444,7 @@ export const DEFAULT_CONFIG: Config = {
   compass: true,
   highlightEmergency: true,
   showAirport: true,
-  airport: SFO_AIRPORT,
+  airport: DEFAULT_AIRPORT,
   showHud: false,
 
   showStars: true,
@@ -483,7 +484,7 @@ export const DEFAULT_CONFIG: Config = {
     rtspUrl: "rtsp://{ip}:554/live/av0",
     rtspSubUrl: "rtsp://{ip}:554/live/av1",
     // Default site = the display center; replace with the camera's real spot.
-    site: { lat: 37.6213, lon: -122.379, altM: 0 },
+    site: { lat: 38.662102, lon: -90.652, altM: 0 },
     limits: {
       panMinDeg: -175,
       panMaxDeg: 175,

@@ -175,7 +175,6 @@ export function Stream() {
         <div className="stream-radar-scope">
           <SkyPolar state={state} config={config} onPick={() => {}} />
         </div>
-        <div className="stream-wordmark">skylightceiling.com</div>
       </section>
     </div>
   );

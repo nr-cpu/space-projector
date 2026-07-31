@@ -1,7 +1,8 @@
 // Airport runway geometry, drawn on the ceiling at true geographic position
-// so departures and arrivals visibly line up with the runways. SFO ships as
-// the default; any other airport can be imported from the control panel by
-// ICAO/IATA code (the server resolves it from the OurAirports dataset).
+// so departures and arrivals visibly line up with the runways. KSUS ships as
+// this fork's default; any other airport can be imported from the control
+// panel by ICAO/IATA code (the server resolves it from the OurAirports
+// dataset — the same source these default coordinates came from).
 
 export interface Runway {
   leIdent: string;
@@ -22,17 +23,16 @@ export interface Airport {
   runways: Runway[];
 }
 
-/** Coordinates from OurAirports (KSFO). */
-export const SFO_AIRPORT: Airport = {
-  icao: "KSFO",
-  name: "SFO",
-  fullName: "San Francisco International Airport",
-  lat: 37.6213,
-  lon: -122.379,
+/** Coordinates from OurAirports (KSUS — Spirit of St. Louis Airport,
+ *  Chesterfield, MO). */
+export const DEFAULT_AIRPORT: Airport = {
+  icao: "KSUS",
+  name: "SUS",
+  fullName: "Spirit of St Louis Airport",
+  lat: 38.662102,
+  lon: -90.652,
   runways: [
-    { leIdent: "10L", heIdent: "28R", le: [37.628742, -122.39341], he: [37.613538, -122.35716], widthFt: 200 },
-    { leIdent: "10R", heIdent: "28L", le: [37.626298, -122.393124], he: [37.61172, -122.358367], widthFt: 200 },
-    { leIdent: "1L", heIdent: "19R", le: [37.607898, -122.38295], he: [37.626476, -122.37063], widthFt: 200 },
-    { leIdent: "1R", heIdent: "19L", le: [37.606333, -122.381061], he: [37.627346, -122.367124], widthFt: 200 },
+    { leIdent: "08L", heIdent: "26R", le: [38.664100646972656, -90.66829681396484], he: [38.66699981689453, -90.6511001586914], widthFt: 75 },
+    { leIdent: "08R", heIdent: "26L", le: [38.65769958, -90.65969849], he: [38.66189957, -90.6341018], widthFt: 150 },
   ],
 };

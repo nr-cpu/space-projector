@@ -14,7 +14,6 @@ flight card on top, live sky camera in the middle, radar scope below.
 │                  │
 ├─────────────────┤
 │     radar        │   ← SkyPolar scope, all aircraft in range
-│  skylightceiling │
 └─────────────────┘
 ```
 

@@ -89,10 +89,11 @@ export interface Sky {
   planets: SkyBody[];
   meteors: MeteorStreak[];
   comets: SkyBody[];
-  /** Points tracing the galactic plane's great circle (az/alt), for the
-   *  Milky Way band glow. Only alt is meaningful per-point; consumers draw a
-   *  soft glow along the path, not individual markers. */
-  milkyWay: { az: number; alt: number }[];
+  /** Dense unresolved-star scatter along the galactic plane — the Milky Way
+   *  reads as a texture of countless faint points (denser and warmer-toned
+   *  toward the galactic center), not a smooth painted band, so this is a
+   *  star field like deepStars, not a path to stroke/fill. */
+  milkyWay: { az: number; alt: number; mag: number; warm: number }[];
   /** Currently-active meteor showers (for HUD/status display), highest activity first. */
   activeShowers: { name: string; fraction: number }[];
 }
@@ -139,14 +140,30 @@ const GAL_POLE_DEC = 27.12825 * DEG;
 const GAL_CENTER_RA = 266.405 * DEG;
 const GAL_CENTER_DEC = -28.936 * DEG;
 
-/** Precomputed galactic-plane great circle, as J2000 RA/Dec (degrees), one
- *  point per degree of galactic longitude. Static — the plane's orientation
+/** Deterministic PRNG (mulberry32) — a fixed seed so the generated star
+ *  scatter is stable across reloads/sessions rather than re-randomizing
+ *  every time computeSky's module loads (which would make the band visibly
+ *  jump every page refresh). */
+function mulberry32(seed: number): () => number {
+  let a = seed;
+  return () => {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** Precomputed Milky Way star scatter — unresolved-star texture along the
+ *  galactic plane, denser and brighter toward the galactic center (the
+ *  bulge), thinning with perpendicular distance from the plane. This is a
+ *  field of individual faint points (like a real long-exposure photo reads),
+ *  not a shape — a shape is what kept rendering as a flat, hard-edged band
+ *  no matter how its opacity/blend was tuned. Static: galactic orientation
  *  relative to the equatorial frame doesn't meaningfully change on any
- *  human timescale. */
-const MILKY_WAY_RADEC: { ra: number; dec: number }[] = (() => {
-  // Unit vector toward the galactic center, and toward the pole — together
-  // they define the plane; a third axis completes an orthonormal frame we
-  // can sweep longitude around.
+ *  human timescale, and the PRNG seed is fixed so the scatter is stable. */
+const MILKY_WAY_STARS: { ra: number; dec: number; mag: number; warm: number }[] = (() => {
   const toVec = (ra: number, dec: number): [number, number, number] => [
     Math.cos(dec) * Math.cos(ra),
     Math.cos(dec) * Math.sin(ra),
@@ -169,15 +186,47 @@ const MILKY_WAY_RADEC: { ra: number; dec: number }[] = (() => {
     pole[2] * cHat[0] - pole[0] * cHat[2],
     pole[0] * cHat[1] - pole[1] * cHat[0],
   ];
-  const pts: { ra: number; dec: number }[] = [];
-  for (let lDeg = 0; lDeg < 360; lDeg += 2) {
+
+  const rnd = mulberry32(0xdec0de);
+  // Sum of uniforms approximates a bell curve without needing Box-Muller.
+  const gaussish = () => (rnd() + rnd() + rnd() + rnd() - 2) / 2; // roughly N(0,1)
+
+  const pts: { ra: number; dec: number; mag: number; warm: number }[] = [];
+  const COUNT = 3200;
+  for (let i = 0; i < COUNT; i++) {
+    // Longitude: uniform, but sampled more densely within ±40° of the
+    // galactic center (l=0) to build up the brighter central bulge.
+    const nearCenter = rnd() < 0.4;
+    const lDeg = nearCenter ? gaussish() * 25 : rnd() * 360 - 180;
     const l = lDeg * DEG;
-    const x = cHat[0] * Math.cos(l) + third[0] * Math.sin(l);
-    const y = cHat[1] * Math.cos(l) + third[1] * Math.sin(l);
-    const z = cHat[2] * Math.cos(l) + third[2] * Math.sin(l);
+
+    // Perpendicular offset from the plane, degrees — tight near the
+    // midplane (most stars), a long tail out to the band's visible width.
+    const perpDeg = gaussish() * 5.5;
+    const perp = perpDeg * DEG;
+
+    // Rotate around the pole by l (in-plane), then tilt by perp (out of
+    // plane, toward the pole).
+    const px = cHat[0] * Math.cos(l) + third[0] * Math.sin(l);
+    const py = cHat[1] * Math.cos(l) + third[1] * Math.sin(l);
+    const pz = cHat[2] * Math.cos(l) + third[2] * Math.sin(l);
+    const x = px * Math.cos(perp) + pole[0] * Math.sin(perp);
+    const y = py * Math.cos(perp) + pole[1] * Math.sin(perp);
+    const z = pz * Math.cos(perp) + pole[2] * Math.sin(perp);
+
     const dec = Math.asin(Math.max(-1, Math.min(1, z))) * R2D;
     const ra = norm360(Math.atan2(y, x) * R2D);
-    pts.push({ ra, dec });
+
+    // Brighter (lower mag) near the midplane and near the galactic center —
+    // real dust/star density falls off both ways from the bulge.
+    const centerDist = Math.abs(((lDeg + 180) % 360) - 180);
+    const brightnessBoost = (nearCenter ? 1.4 : 0.6) - Math.min(1, centerDist / 60) * 0.5;
+    const mag = 5.5 + gaussish() * 1.3 - brightnessBoost + Math.abs(perpDeg) * 0.12;
+    // Warmth 0..1 — higher near the galactic center (real dust glow is
+    // rust/gold there), cooler/neutral out in the spiral-arm sections.
+    const warm = Math.max(0, Math.min(1, (nearCenter ? 0.75 : 0.25) - centerDist / 90));
+
+    pts.push({ ra, dec, mag, warm });
   }
   return pts;
 })();
@@ -507,9 +556,10 @@ export function computeSky(date: Date, latDeg: number, lonDeg: number, o: SkyOpt
   }
   if (o.milkyWay) {
     const lst = Astronomy.SiderealTime(date) + lonDeg / 15;
-    for (const { ra, dec } of MILKY_WAY_RADEC) {
-      const { az, alt } = starAltAz(ra, dec, lst, latDeg);
-      sky.milkyWay.push({ az, alt });
+    for (const s of MILKY_WAY_STARS) {
+      const { az, alt } = starAltAz(s.ra, s.dec, lst, latDeg);
+      if (alt < -2) continue;
+      sky.milkyWay.push({ az, alt, mag: s.mag, warm: s.warm });
     }
   }
   if (o.meteors) {
