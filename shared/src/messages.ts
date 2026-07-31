@@ -16,25 +16,11 @@ export interface SourceStatus {
   message?: string;
 }
 
-/** An aircraft on the airport surface (from the airplanes.live area API). */
-export interface GroundAircraft {
-  hex: string;
-  /** Callsign, trimmed. */
-  flight?: string;
-  reg?: string;
-  typeCode?: string;
-  lat: number;
-  lon: number;
-  trackDeg?: number;
-  gsKt?: number;
-}
-
 /** Server -> client. */
 export type ServerMessage =
   | { type: "config"; config: Config }
   | { type: "aircraft"; now: number; aircraft: Aircraft[] }
-  | { type: "status"; status: SourceStatus }
-  | { type: "sfoGround"; at: number; aircraft: GroundAircraft[] };
+  | { type: "status"; status: SourceStatus };
 
 /** Client -> server. */
 export type ClientMessage =

@@ -8,7 +8,6 @@ import type {
   ServerMessage,
   Config,
   Aircraft,
-  GroundAircraft,
   SourceStatus,
 } from "@shared/index.js";
 import { ConfigValidationError, type ConfigStore } from "./config-store.js";
@@ -17,8 +16,6 @@ export interface HubDeps {
   store: ConfigStore;
   getSnapshot: () => { now: number; aircraft: Aircraft[] };
   getStatus: () => SourceStatus;
-  /** Latest SFO surface snapshot (null until the first successful poll). */
-  getSfoGround?: () => { at: number; aircraft: GroundAircraft[] } | null;
   /** Browser Origin check — defends against cross-site WebSocket hijack.
    *  Receives the raw Origin header value (undefined for non-browser clients). */
   isOriginAllowed?: (origin: string | undefined) => boolean;
@@ -56,10 +53,6 @@ export class Hub {
     const snap = this.deps.getSnapshot();
     this.send(ws, { type: "aircraft", now: snap.now, aircraft: snap.aircraft });
     this.send(ws, { type: "status", status: this.deps.getStatus() });
-    const ground = this.deps.getSfoGround?.();
-    if (ground) {
-      this.send(ws, { type: "sfoGround", at: ground.at, aircraft: ground.aircraft });
-    }
 
     ws.on("message", (raw) => this.onMessage(ws, raw.toString()));
     ws.on("close", () => this.clients.delete(ws));
@@ -93,9 +86,6 @@ export class Hub {
   }
   broadcastStatus(status: SourceStatus): void {
     this.broadcast({ type: "status", status });
-  }
-  broadcastSfoGround(at: number, aircraft: GroundAircraft[]): void {
-    this.broadcast({ type: "sfoGround", at, aircraft });
   }
   broadcastConfig(config: Config): void {
     this.broadcast({ type: "config", config });

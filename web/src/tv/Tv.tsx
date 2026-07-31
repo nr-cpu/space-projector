@@ -16,7 +16,6 @@ import { useLiveVideo } from "../tracker/useLiveVideo.js";
 import { useMse } from "./useMse.js";
 import { useStabilize } from "./useStabilize.js";
 import { SkyPolar } from "../tracker/components/SkyPolar.js";
-import { SfoGroundPanel } from "./SfoGround.js";
 
 function routeLine(ac: Aircraft | undefined): { from?: string; to?: string } {
   if (!ac) return {};
@@ -113,8 +112,6 @@ export function Tv() {
   // route data is too unreliable to broadcast). The living-room TV keeps it.
   const params = new URLSearchParams(window.location.search);
   const showRoute = params.get("route") !== "0";
-  // ?ground=0 hides the SFO surface panel.
-  const showGround = params.get("ground") !== "0";
   const { from, to } = routeLine(targetAc);
   const tracking = Boolean(target?.hex);
 
@@ -185,7 +182,7 @@ export function Tv() {
         </div>
         <div className="tv-clock">
           {mse.ok && fps != null ? `${fps} FPS · ` : ""}
-          {mse.ok ? "" : "MJPEG · "}SFO · {clock}
+          {mse.ok ? "" : "MJPEG · "}{clock}
         </div>
       </header>
 
@@ -194,9 +191,6 @@ export function Tv() {
         <div className="tv-radar-title">RADAR · {state.candidates.length} IN RANGE</div>
         <SkyPolar state={state} config={config} onPick={() => {}} />
       </aside>
-
-      {/* SFO surface traffic — who's taxiing / next up */}
-      {showGround && <SfoGroundPanel ground={serverState.sfoGround} />}
 
       {/* flight card */}
       <section className={`tv-card ${tracking ? "" : "idle"}`}>

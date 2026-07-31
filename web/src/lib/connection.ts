@@ -5,7 +5,6 @@ import type {
   Aircraft,
   ClientMessage,
   Config,
-  GroundAircraft,
   ServerMessage,
   SourceStatus,
 } from "@shared/index.js";
@@ -16,8 +15,6 @@ export interface StreamState {
   now: number;
   aircraft: Aircraft[];
   status: SourceStatus | null;
-  /** SFO surface traffic snapshot (TV / stream "who's next" panel). */
-  sfoGround: { at: number; aircraft: GroundAircraft[] } | null;
 }
 
 type Listener = (state: StreamState) => void;
@@ -34,7 +31,6 @@ export class Connection {
     now: 0,
     aircraft: [],
     status: null,
-    sfoGround: null,
   };
 
   constructor(private role: "display" | "control") {}
@@ -92,9 +88,6 @@ export class Connection {
         break;
       case "status":
         this.update({ status: msg.status });
-        break;
-      case "sfoGround":
-        this.update({ sfoGround: { at: msg.at, aircraft: msg.aircraft } });
         break;
     }
   }

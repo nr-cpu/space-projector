@@ -88,13 +88,6 @@ body,
 .hud-dot.bad {
   background: #e0533d;
 }
-.reconnect {
-  position: fixed;
-  bottom: 14px;
-  right: 16px;
-  font: 12px "JetBrains Mono", ui-monospace, monospace;
-  color: #6b7280;
-}
 .ambient-toggle {
   position: fixed;
   bottom: 12px;

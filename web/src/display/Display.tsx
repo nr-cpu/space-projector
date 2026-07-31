@@ -304,7 +304,13 @@ export function Display() {
     if (showOrbital && hover) setHover(null); // no stale ground-view tooltip carried over
   }
 
-  const cfg = state.config;
+  // Render immediately from defaults regardless of connection state — this
+  // display must work fully offline (embedded star/satellite/comet data,
+  // real astronomy computed client-side). A missing WebSocket should never
+  // block real content from showing; it only means live aircraft/shared
+  // config sync aren't available yet, not that the sky can't render.
+  const cfg = state.config ?? DEFAULT_CONFIG;
+  const offline = !state.connected;
   return (
     <div className="display-root">
       <canvas
@@ -312,31 +318,28 @@ export function Display() {
         className="display-canvas"
         style={showOrbital ? { visibility: "hidden", pointerEvents: "none" } : undefined}
       />
-      {cfg && showOrbital && (
+      {showOrbital && (
         <div className="orbital-overlay">
           <OrbitalView cfg={cfg} tles={tles} aircraft={state.aircraft} pullback={pullback} />
         </div>
       )}
-      {cfg?.showHud && (
+      {cfg.showHud && (
         <div className="hud">
           <div className={`hud-dot ${state.connected ? "ok" : "bad"}`} />
           <span>
-            {state.status?.source ?? "—"} · {state.aircraft.length} ac ·{" "}
+            {offline ? "offline (local defaults)" : state.status?.source ?? "—"} · {state.aircraft.length} ac ·{" "}
             rot {cfg.rotationDeg}° · mirror {cfg.mirrorX ? "X" : "–"}
             {cfg.mirrorY ? "Y" : ""} · r {formatDistance(cfg.radiusMiles, cfg.distanceUnit)} · {cfg.projectionMode} · {cfg.theme}
           </span>
         </div>
       )}
-      {!state.connected && <div className="reconnect">connecting…</div>}
-      {cfg && (
-        <QuickSettings
-          cfg={cfg}
-          patch={(patch) => {
-            rendererRef.current?.noteInteraction();
-            conn.patchConfig(patch);
-          }}
-        />
-      )}
+      <QuickSettings
+        cfg={cfg}
+        patch={(patch) => {
+          rendererRef.current?.noteInteraction();
+          conn.patchConfig(patch);
+        }}
+      />
       {hover && (
         <div className="hover-tip" style={{ left: hover.x, top: hover.y }}>
           {hover.label}
