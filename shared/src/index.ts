@@ -11,3 +11,5 @@ export * from "./route.js";
 export * from "./camera.js";
 export * from "./aim.js";
 export * from "./tracker-messages.js";
+export * from "./tle-embedded.js";
+export * from "./comets-embedded.js";

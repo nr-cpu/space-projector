@@ -49,6 +49,8 @@ import {
   type Meters,
   type Point,
   type SkyAngles,
+  EMBEDDED_TLES,
+  EMBEDDED_COMETS,
 } from "@shared/index.js";
 import { classifyGlyph, drawAircraftGlyph, GLYPH_SCALE } from "./aircraftGlyph.js";
 import { computeSky, type Sky, type Tle, type CometElements } from "./celestial.js";
@@ -240,9 +242,13 @@ export class Renderer {
    *  pickDriftZoom), not per frame. */
   private driftTargetZoom = 8;
 
-  // Sky layer state.
-  private tles: Tle[] = [];
-  private comets: CometElements[] = [];
+  // Sky layer state. Seeded from the build-time embedded snapshot (real
+  // TLEs/comet elements baked into the bundle — see shared/scripts/build-tle.mjs
+  // and build-comets.mjs) so satellites/comets render immediately with zero
+  // network access; fetchTles/fetchComets overwrite these with live data
+  // whenever the network is reachable, but never leave the sky empty.
+  private tles: Tle[] = EMBEDDED_TLES;
+  private comets: CometElements[] = EMBEDDED_COMETS;
   private sky: Sky = {
     stars: [],
     deepStars: [],
@@ -308,18 +314,27 @@ export class Renderer {
   private async fetchTles(): Promise<void> {
     try {
       const res = await fetch("/api/tle");
-      if (res.ok) this.tles = (await res.json()) as Tle[];
+      if (res.ok) {
+        const live = (await res.json()) as Tle[];
+        // Only replace the embedded seed if the server actually has data —
+        // an empty/unreachable response should keep showing the embedded
+        // snapshot rather than blanking the sky.
+        if (live.length) this.tles = live;
+      }
     } catch {
-      /* keep whatever we had */
+      /* offline — keep the embedded snapshot or last-known-good live data */
     }
   }
 
   private async fetchComets(): Promise<void> {
     try {
       const res = await fetch("/api/comets");
-      if (res.ok) this.comets = (await res.json()) as CometElements[];
+      if (res.ok) {
+        const live = (await res.json()) as CometElements[];
+        if (live.length) this.comets = live;
+      }
     } catch {
-      /* keep whatever we had */
+      /* offline — keep the embedded snapshot or last-known-good live data */
     }
   }
   stop(): void {
