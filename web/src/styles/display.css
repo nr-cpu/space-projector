@@ -36,6 +36,25 @@ body,
       4 4,
     crosshair;
 }
+/* Orbital pullback view — fades in over the ground dome canvas as pullback
+   (0..1) increases; pointer-events stay off so scroll/drag on the canvas
+   underneath keep driving the same continuous zoom gesture. */
+.orbital-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.orbital-view {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+.orbital-view canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
 /* Idle timeout (see Display.tsx) hides the cursor entirely after a few
    seconds of no mouse movement — the ambient/kiosk look, restored the
    moment the pointer moves again. */

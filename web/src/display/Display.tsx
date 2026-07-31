@@ -5,6 +5,8 @@ import { useStream } from "../lib/useStream.js";
 import { useAmbientMode, kioskRequested } from "../lib/useAmbientMode.js";
 import { Renderer } from "./renderer.js";
 import { QuickSettings } from "./QuickSettings.js";
+import { OrbitalView } from "./OrbitalView.js";
+import type { Tle } from "./celestial.js";
 
 const THEMES: Theme[] = ["ambient", "telemetry", "focus"];
 
@@ -15,6 +17,12 @@ export function Display() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rendererRef = useRef<Renderer | null>(null);
   const [hover, setHover] = useState<{ x: number; y: number; label: string } | null>(null);
+  // 0 = ground dome view (unchanged); 1 = fully pulled back to orbital view.
+  // Local-only — each viewer's own camera exploration, not synced to the
+  // shared config the way skyZoom/skyPanAz/skyPanAlt are.
+  const [pullback, setPullback] = useState(0);
+  const pullbackRef = useRef(0);
+  const [tles, setTles] = useState<Tle[]>([]);
 
   // Keep the latest config in a ref so the RAF loop always reads fresh values.
   const configRef = useRef<Config>(state.config ?? DEFAULT_CONFIG);
@@ -43,6 +51,18 @@ export function Display() {
   useEffect(() => {
     rendererRef.current?.update(state.aircraft);
   }, [state.now, state.aircraft]);
+
+  // Mirror the Renderer's already-fetched TLE set into React state, but only
+  // while the orbital pullback view is actually visible — no point paying
+  // for the extra re-renders while the ground dome is showing.
+  useEffect(() => {
+    if (pullback <= 0) return;
+    const id = setInterval(() => {
+      const t = rendererRef.current?.getTles();
+      if (t) setTles(t);
+    }, 2000);
+    return () => clearInterval(id);
+  }, [pullback]);
 
   // Source health: during an outage the renderer holds planes instead of
   // staling them out. A dropped WebSocket counts as an outage too.
@@ -107,9 +127,31 @@ export function Display() {
       if (c.projectionMode !== "sky") return;
       e.preventDefault();
       rendererRef.current?.noteInteraction();
+
+      // Already pulled back into orbital view: scrolling further out eases
+      // pullback toward 1 (whole Earth); scrolling in eases it back toward
+      // 0, and once it reaches 0 control returns to the normal sky zoom —
+      // one continuous gesture across the boundary, not two disconnected
+      // controls.
+      if (pullbackRef.current > 0) {
+        const next = Math.max(0, Math.min(1, pullbackRef.current + e.deltaY * 0.0009));
+        pullbackRef.current = next;
+        setPullback(next);
+        if (next > 0) return;
+      }
+
       const factor = Math.exp(-e.deltaY * 0.0015);
-      const nextZoom = Math.max(1, Math.min(40, c.skyZoom * factor));
-      conn.patchConfig({ skyZoom: nextZoom });
+      const nextZoom = c.skyZoom * factor;
+      if (nextZoom < 1 && e.deltaY > 0) {
+        // Crossed the dome's zoom floor while still scrolling out: hand off
+        // to the orbital pullback instead of clamping at 1x forever.
+        conn.patchConfig({ skyZoom: 1 });
+        const next = Math.min(1, (1 - nextZoom) * 1.5);
+        pullbackRef.current = next;
+        setPullback(next);
+        return;
+      }
+      conn.patchConfig({ skyZoom: Math.max(1, Math.min(40, nextZoom)) });
     };
 
     let dragging = false;
@@ -208,6 +250,11 @@ export function Display() {
   return (
     <div className="display-root">
       <canvas ref={canvasRef} className="display-canvas" />
+      {cfg && pullback > 0 && (
+        <div className="orbital-overlay" style={{ opacity: Math.min(1, pullback * 2.5) }}>
+          <OrbitalView cfg={cfg} tles={tles} aircraft={state.aircraft} pullback={pullback} />
+        </div>
+      )}
       {cfg?.showHud && (
         <div className="hud">
           <div className={`hud-dot ${state.connected ? "ok" : "bad"}`} />

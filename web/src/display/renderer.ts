@@ -306,6 +306,12 @@ export class Renderer {
     this.raf = requestAnimationFrame(loop);
   }
 
+  /** Current TLE set (already fetched/cached here) — reused by the orbital
+   *  pullback view so it isn't a second independent poller of /api/tle. */
+  getTles(): Tle[] {
+    return this.tles;
+  }
+
   private async fetchTles(): Promise<void> {
     try {
       const res = await fetch("/api/tle");
