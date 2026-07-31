@@ -42,6 +42,11 @@ export function Display() {
   // scrolling out, well before the hard cutoff needs it visible — never unmounts
   // again after that, so re-crossing the boundary later is instant.
   const everEnteredOrbitalRef = useRef(false);
+  // Latest requestExitToGround implementation (defined in the wheel-handling
+  // effect below, which needs conn/configRef already in scope) — held in a
+  // ref so the JSX render can pass a stable callback to OrbitalView without
+  // that effect and the render depending on each other's ordering.
+  const requestExitToGroundRef = useRef<() => void>(() => {});
   const [tles, setTles] = useState<Tle[]>([]);
 
   // Keep the latest config in a ref so the RAF loop always reads fresh values.
@@ -158,6 +163,27 @@ export function Display() {
       if (next > 0) everEnteredOrbitalRef.current = true;
       setPullback(next);
     };
+
+    // Deliberate "head back to the ground dome" request from OrbitalView
+    // (Shift+scroll-in or double-click at whole-Earth zoom — plain scroll-in
+    // is claimed by regional zoom instead, so this needs its own gesture and
+    // its own eased transition, since it isn't reachable through the normal
+    // continuous wheel-driven pullback path once regional zoom owns that).
+    let exitRaf = 0;
+    const requestExitToGround = () => {
+      cancelAnimationFrame(exitRaf);
+      const EXIT_MS = 700;
+      const startPullback = pullbackRef.current;
+      const t0 = performance.now();
+      const step = () => {
+        const t = Math.min(1, (performance.now() - t0) / EXIT_MS);
+        const eased = 1 - Math.pow(1 - t, 3); // ease-out cubic
+        updatePullback(startPullback * (1 - eased));
+        if (t < 1) exitRaf = requestAnimationFrame(step);
+      };
+      exitRaf = requestAnimationFrame(step);
+    };
+    requestExitToGroundRef.current = requestExitToGround;
 
     const applyZoomDelta = (dy: number) => {
       const c = configRef.current;
@@ -282,6 +308,7 @@ export function Display() {
     canvas.addEventListener("pointerleave", onPointerLeave);
     canvas.addEventListener("dblclick", onDoubleClick);
     return () => {
+      cancelAnimationFrame(exitRaf);
       root.removeEventListener("wheel", onWheel);
       canvas.removeEventListener("pointerdown", onPointerDown);
       canvas.removeEventListener("pointermove", onPointerMove);
@@ -354,6 +381,7 @@ export function Display() {
             aircraft={state.aircraft}
             pullback={pullback}
             onHover={setHover}
+            onRequestExitToGround={() => requestExitToGroundRef.current()}
           />
         </div>
       )}

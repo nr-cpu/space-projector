@@ -23,6 +23,12 @@ interface OrbitalViewProps {
    *  the observer marker, null otherwise (mirrors the ground dome's hover
    *  tooltip contract in Display.tsx). */
   onHover?: (hover: { x: number; y: number; label: string } | null) => void;
+  /** Requests a smooth return to the ground dome view (Shift+scroll-in or
+   *  double-click while at whole-Earth zoom) — plain scroll-in is claimed by
+   *  regional zoom instead, so heading back down needs an explicit signal;
+   *  pullback itself is owned by Display.tsx, hence the callback rather than
+   *  OrbitalView reducing it directly. */
+  onRequestExitToGround?: () => void;
 }
 
 /** Scene-unit scale: 1 scene unit = 1000 km, so the whole Earth+satellite
@@ -42,7 +48,7 @@ interface SceneState {
   raf: number;
 }
 
-export function OrbitalView({ cfg, tles, aircraft, pullback, onHover }: OrbitalViewProps) {
+export function OrbitalView({ cfg, tles, aircraft, pullback, onHover, onRequestExitToGround }: OrbitalViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const stateRef = useRef<SceneState | null>(null);
 
@@ -54,12 +60,34 @@ export function OrbitalView({ cfg, tles, aircraft, pullback, onHover }: OrbitalV
   aircraftRef.current = aircraft;
   const pullbackRef = useRef(pullback);
   pullbackRef.current = pullback;
+  const onRequestExitToGroundRef = useRef(onRequestExitToGround);
+  onRequestExitToGroundRef.current = onRequestExitToGround;
   const onHoverRef = useRef(onHover);
   onHoverRef.current = onHover;
   // Observer marker's current screen-space position (px, container-relative),
   // updated every frame from its 3D position — the hit test compares the
   // pointer against this rather than doing a full raycast for one small dot.
   const markerScreenRef = useRef<{ x: number; y: number } | null>(null);
+
+  // Manual camera orbit (drag-to-spin) — yaw/pitch offset in degrees applied
+  // on top of the default observer-facing camera position. Dragging pauses
+  // the automatic day/night spin (frozen at whatever angle it was, held
+  // steady rather than fighting the user's drag) until pullback returns to 0
+  // (scrolling back to the ground view resets both, so re-entering orbital
+  // view later starts fresh at real time again rather than picking up a
+  // stale manual orientation).
+  const orbitYawRef = useRef(0);
+  const orbitPitchRef = useRef(0);
+  const draggingRef = useRef(false);
+  const frozenSpinDegRef = useRef<number | null>(null);
+  // Regional zoom: camera distance factor, 1 = whole-Earth framing (the
+  // existing pullback=1 distance), down to REGION_ZOOM_MIN = tight enough to
+  // frame roughly a continent. Only engages once already fully pulled back
+  // (pullback=1) — scrolling further in at that point tightens the view
+  // instead of doing nothing, scrolling back out returns to whole-Earth, and
+  // beyond that hands back to pullback (which owns the orbital<->ground
+  // boundary) exactly like the ground dome's own zoom floor hand-off.
+  const regionZoomRef = useRef(1);
 
   // Scene setup — once.
   useEffect(() => {
@@ -172,20 +200,44 @@ export function OrbitalView({ cfg, tles, aircraft, pullback, onHover }: OrbitalV
       const c = cfgRef.current;
       const now = performance.now();
 
+      // Scrolled all the way back to the ground view: clear the manual drag
+      // orbit, regional zoom, and any frozen spin angle, so re-entering
+      // orbital view later starts fresh (real-time spin, whole-Earth
+      // framing) rather than picking up a stale manual orientation.
+      if (pullbackRef.current <= 0) {
+        orbitYawRef.current = 0;
+        orbitPitchRef.current = 0;
+        regionZoomRef.current = 1;
+        frozenSpinDegRef.current = null;
+      }
+
       // Advance the sped-up visual angle at a constant rate regardless of
       // pullback (so it's already caught up and spinning smoothly the
       // instant pullback crosses into "watch it turn" territory, rather than
-      // restarting from a standstill).
+      // restarting from a standstill) — but not while the user is actively
+      // dragging the globe, which pauses the spin at its current angle so
+      // the drag isn't fighting an angle that keeps advancing underneath it.
       const dtSec = (now - lastVisualTick) / 1000;
       lastVisualTick = now;
-      visualRotationDeg = (visualRotationDeg + VISUAL_DEG_PER_SEC * dtSec) % 360;
+      if (!draggingRef.current) {
+        visualRotationDeg = (visualRotationDeg + VISUAL_DEG_PER_SEC * dtSec) % 360;
+      }
 
       // Blend real GMST (accurate registration right at the dome boundary)
       // toward the fast visual spin as pullback increases, so the globe's
       // orientation doesn't jump the instant the hard cut happens.
       const realDeg = gmstDegrees(new Date());
       const blend = THREE.MathUtils.smoothstep(pullbackRef.current, 0.15, 0.5);
-      const shownDeg = THREE.MathUtils.lerp(realDeg, visualRotationDeg, blend);
+      let shownDeg: number;
+      if (draggingRef.current) {
+        if (frozenSpinDegRef.current == null) {
+          frozenSpinDegRef.current = THREE.MathUtils.lerp(realDeg, visualRotationDeg, blend);
+        }
+        shownDeg = frozenSpinDegRef.current;
+      } else {
+        frozenSpinDegRef.current = null;
+        shownDeg = THREE.MathUtils.lerp(realDeg, visualRotationDeg, blend);
+      }
 
       // Earth's rotation, applied to the mesh — satellite/aircraft ECEF
       // positions are Earth-fixed, so rotating the globe under them (rather
@@ -213,7 +265,15 @@ export function OrbitalView({ cfg, tles, aircraft, pullback, onHover }: OrbitalV
       const obsScene = ecefToScene(obsEcef, earthRotation);
       observerMarker.position.copy(obsScene);
 
-      positionCamera(camera, obsScene, earthRadius, pullbackRef.current);
+      positionCamera(
+        camera,
+        obsScene,
+        earthRadius,
+        pullbackRef.current,
+        orbitYawRef.current,
+        orbitPitchRef.current,
+        regionZoomRef.current,
+      );
 
       // Project the marker to screen space for hover hit-testing. Also check
       // it's actually facing the camera (not on the globe's far side) —
@@ -238,7 +298,22 @@ export function OrbitalView({ cfg, tles, aircraft, pullback, onHover }: OrbitalV
     loop();
 
     const HOVER_RADIUS_PX = 14;
+    let lastDragX = 0;
+    let lastDragY = 0;
+    const DEG_PER_PX = 0.25;
+
     const onPointerMove = (e: PointerEvent) => {
+      if (draggingRef.current) {
+        const dx = e.clientX - lastDragX;
+        const dy = e.clientY - lastDragY;
+        lastDragX = e.clientX;
+        lastDragY = e.clientY;
+        orbitYawRef.current = (orbitYawRef.current - dx * DEG_PER_PX) % 360;
+        orbitPitchRef.current = THREE.MathUtils.clamp(orbitPitchRef.current - dy * DEG_PER_PX, -80, 80);
+        onHoverRef.current?.(null); // no stale tooltip while actively dragging
+        return;
+      }
+
       const m = markerScreenRef.current;
       const rect = container.getBoundingClientRect();
       const px = e.clientX - rect.left;
@@ -251,15 +326,78 @@ export function OrbitalView({ cfg, tles, aircraft, pullback, onHover }: OrbitalV
         onHoverRef.current?.(null);
       }
     };
-    const onPointerLeave = () => onHoverRef.current?.(null);
+    const onPointerLeave = () => {
+      if (!draggingRef.current) onHoverRef.current?.(null);
+    };
+    // Only meaningful once fully pulled back (matches positionCamera's own
+    // manualStrength ramp) — dragging mid-transition would fight the
+    // ground-dome hand-off framing.
+    const onPointerDown = (e: PointerEvent) => {
+      if (pullbackRef.current < 0.9) return;
+      draggingRef.current = true;
+      lastDragX = e.clientX;
+      lastDragY = e.clientY;
+      container.setPointerCapture(e.pointerId);
+    };
+    const onPointerUp = (e: PointerEvent) => {
+      if (!draggingRef.current) return;
+      draggingRef.current = false;
+      try {
+        container.releasePointerCapture(e.pointerId);
+      } catch {
+        /* already released */
+      }
+    };
+
+    // Regional zoom: only engages once fully pulled back and not mid-drag.
+    // Plain scroll claims the whole in/out range for regional zoom (standard
+    // "scroll to zoom" convention) — 1 = whole Earth down to REGION_ZOOM_MIN
+    // = roughly a continent, and it's the only thing plain scroll does here,
+    // never handing off to pullback on its own. Returning to the ground dome
+    // from whole-Earth is a deliberate separate gesture (Shift+scroll-in, or
+    // double-click) specifically because plain scroll-in is already spoken
+    // for by regional zoom and the two can't share it unambiguously.
+    const REGION_ZOOM_STEP = 0.0012;
+    const onWheel = (e: WheelEvent) => {
+      if (pullbackRef.current < 0.99) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.shiftKey && e.deltaY < 0 && regionZoomRef.current >= 0.999) {
+        onRequestExitToGroundRef.current?.();
+        return;
+      }
+      const factor = Math.exp(e.deltaY * REGION_ZOOM_STEP);
+      regionZoomRef.current = THREE.MathUtils.clamp(regionZoomRef.current * factor, REGION_ZOOM_MIN, 1);
+    };
+    const onDoubleClick = () => {
+      if (pullbackRef.current < 0.99) return;
+      if (regionZoomRef.current < 0.999) {
+        // First double-click zooms back out to whole-Earth (undo regional
+        // zoom); only a second one, once already at whole-Earth, exits.
+        regionZoomRef.current = 1;
+        return;
+      }
+      onRequestExitToGroundRef.current?.();
+    };
+
     container.addEventListener("pointermove", onPointerMove);
     container.addEventListener("pointerleave", onPointerLeave);
+    container.addEventListener("pointerdown", onPointerDown);
+    container.addEventListener("pointerup", onPointerUp);
+    container.addEventListener("dblclick", onDoubleClick);
+    container.addEventListener("pointercancel", onPointerUp);
+    container.addEventListener("wheel", onWheel, { passive: false });
 
     return () => {
       cancelAnimationFrame(stateRef.current!.raf);
       ro.disconnect();
       container.removeEventListener("pointermove", onPointerMove);
       container.removeEventListener("pointerleave", onPointerLeave);
+      container.removeEventListener("pointerdown", onPointerDown);
+      container.removeEventListener("pointerup", onPointerUp);
+      container.removeEventListener("dblclick", onDoubleClick);
+      container.removeEventListener("pointercancel", onPointerUp);
+      container.removeEventListener("wheel", onWheel);
       renderer.dispose();
       satGeom.dispose();
       acGeom.dispose();
@@ -313,18 +451,55 @@ function updatePoints(
 /** Camera eases from "at the observer's surface point, looking outward"
  *  (pullback=0, matches where the ground dome view leaves off) to "pulled
  *  back along that same radial line, looking at the whole Earth"
- *  (pullback=1). One continuous move, not a cut. */
+ *  (pullback=1). One continuous move, not a cut.
+ *
+ *  Once fully pulled back, orbitYaw/orbitPitch (degrees, drag-to-rotate) spin
+ *  the camera around the globe's center instead of sitting fixed above the
+ *  observer, and regionZoom (1 = whole Earth, down to REGION_ZOOM_MIN =
+ *  roughly a continent) tightens the distance — both ramped in by pullback
+ *  itself so they don't fight the ground-dome hand-off while still
+ *  transitioning. */
+const REGION_ZOOM_MIN = 0.22;
 function positionCamera(
   camera: THREE.PerspectiveCamera,
   observerScene: THREE.Vector3,
   earthRadiusScene: number,
   pullback: number,
+  orbitYawDeg: number,
+  orbitPitchDeg: number,
+  regionZoom: number,
 ): void {
   const outward = observerScene.clone().normalize();
   const nearDist = earthRadiusScene * 1.001; // just above the surface
   const farDist = earthRadiusScene * 4.2; // whole Earth comfortably in frame
-  const dist = THREE.MathUtils.lerp(nearDist, farDist, pullback);
-  camera.position.copy(outward.clone().multiplyScalar(dist));
+  // Regional-zoom floor: framed to comfortably show roughly a continent, not
+  // a naive fraction of farDist — that would put the camera inside the globe
+  // (REGION_ZOOM_MIN * farDist < earthRadiusScene) at the tightest setting.
+  const regionDist = earthRadiusScene * 1.5;
+  const pulledBackDist = THREE.MathUtils.lerp(nearDist, farDist, pullback);
+  const dist = THREE.MathUtils.lerp(
+    regionDist,
+    pulledBackDist,
+    THREE.MathUtils.clamp((regionZoom - REGION_ZOOM_MIN) / (1 - REGION_ZOOM_MIN), 0, 1),
+  );
+
+  // Ramp the manual orbit in smoothly over the same range the day/night spin
+  // uses, so drag/regional-zoom only takes hold once meaningfully pulled
+  // back, not mid-transition from the ground dome.
+  const manualStrength = THREE.MathUtils.smoothstep(pullback, 0.15, 0.5);
+  let dir = outward;
+  if (manualStrength > 0.001) {
+    const worldUp = new THREE.Vector3(0, 1, 0);
+    const yawed = outward.clone().applyAxisAngle(worldUp, THREE.MathUtils.degToRad(orbitYawDeg * manualStrength));
+    // Pitch axis derived from the yawed direction itself (cross with world
+    // up), not a fixed world axis — otherwise the tilt only reads as a clean
+    // up/down drag for observers near a particular longitude and goes
+    // diagonal everywhere else.
+    const pitchAxis = new THREE.Vector3().crossVectors(worldUp, yawed).normalize();
+    dir = yawed.applyAxisAngle(pitchAxis, THREE.MathUtils.degToRad(orbitPitchDeg * manualStrength));
+  }
+
+  camera.position.copy(dir.multiplyScalar(dist));
   camera.up.set(0, 1, 0);
   camera.lookAt(pullback < 0.05 ? outward.clone().multiplyScalar(nearDist * 1.5) : new THREE.Vector3(0, 0, 0));
 }
