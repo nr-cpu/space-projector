@@ -195,6 +195,15 @@ export function OrbitalView({ cfg, tles, aircraft, pullback, onHover, onRequestE
     // the camera move still update every frame, so the view stays smooth.
     const SAT_UPDATE_INTERVAL_MS = 300;
     let lastSatUpdate = 0;
+    // Previous/next computed ECEF sets (pre-rotation) for satellites and
+    // aircraft, interpolated every frame between recomputes so the fast
+    // Earth spin (which keeps advancing every frame) doesn't produce a
+    // visible ~1° snap each time SAT_UPDATE_INTERVAL_MS elapses — smooth
+    // motion without paying for a full SGP4 propagation every frame.
+    let satPrev: { pos: { x: number; y: number; z: number } }[] = [];
+    let satNext: { pos: { x: number; y: number; z: number } }[] = [];
+    let acPrev: { pos: { x: number; y: number; z: number } }[] = [];
+    let acNext: { pos: { x: number; y: number; z: number } }[] = [];
     const loop = () => {
       stateRef.current!.raf = requestAnimationFrame(loop);
       const c = cfgRef.current;
@@ -247,27 +256,42 @@ export function OrbitalView({ cfg, tles, aircraft, pullback, onHover, onRequestE
       earth.rotation.y = earthRotation;
       stars.rotation.y = 0; // starfield stays fixed (inertial), Earth spins under it
 
-      if (now - lastSatUpdate >= SAT_UPDATE_INTERVAL_MS) {
+      if (now - lastSatUpdate >= SAT_UPDATE_INTERVAL_MS || (satPrev.length === 0 && satNext.length === 0)) {
         lastSatUpdate = now;
-        // Earth only turns ~0.04° in one interval, so the tiny lag between
-        // recomputes (satellites drawn at the rotation angle from their last
-        // update, not this exact instant) is imperceptible — not worth
-        // re-touching every point's buffer every frame to correct for it.
-        updatePoints(satPoints, orbitalSatellites(tlesRef.current, new Date()), earthRotation);
-        updatePoints(
-          acPoints,
-          orbitalAircraft(aircraftRef.current).map((a) => ({ pos: a.pos })),
-          earthRotation,
-        );
+        satPrev = satNext;
+        satNext = orbitalSatellites(tlesRef.current, new Date());
+        acPrev = acNext;
+        acNext = orbitalAircraft(aircraftRef.current).map((a) => ({ pos: a.pos }));
       }
+      // Interpolate rotation-agnostic ECEF positions between the last two
+      // computed sets, then apply the current (per-frame) earthRotation —
+      // this is what actually removes the jitter, since it keeps the
+      // rendered positions moving smoothly in step with the globe's
+      // continuous spin instead of holding still for 300ms and snapping.
+      const satInterpT = SAT_UPDATE_INTERVAL_MS > 0 ? Math.min(1, (now - lastSatUpdate) / SAT_UPDATE_INTERVAL_MS) : 1;
+      updatePoints(satPoints, interpolatePositions(satPrev, satNext, satInterpT), earthRotation);
+      updatePoints(acPoints, interpolatePositions(acPrev, acNext, satInterpT), earthRotation);
 
       const obsEcef = geodeticToEcefKm(c.centerLat, c.centerLon, 0);
+      // Marker/satellites/aircraft ride the fast visual spin (earthRotation)
+      // so they visibly move with the turning globe, but the CAMERA'S
+      // viewing direction must come from the real, slow rotation instead —
+      // otherwise the camera itself orbits the globe once per fast-spin
+      // revolution (every ~2 minutes) rather than sitting still while the
+      // globe turns beneath it. That coupling was the actual cause of both
+      // "stars sweeping past instead of the Earth turning" (the camera's own
+      // motion around the origin drags the fixed starfield across the frame)
+      // and "satellites jiggling" (camera re-orbits every frame, satellite
+      // positions only refresh every SAT_UPDATE_INTERVAL_MS, so they visibly
+      // lag behind the camera's continuous motion between refreshes).
+      const cameraRotation = THREE.MathUtils.degToRad(realDeg);
+      const obsSceneCamera = ecefToScene(obsEcef, cameraRotation);
       const obsScene = ecefToScene(obsEcef, earthRotation);
       observerMarker.position.copy(obsScene);
 
       positionCamera(
         camera,
-        obsScene,
+        obsSceneCamera,
         earthRadius,
         pullbackRef.current,
         orbitYawRef.current,
@@ -420,6 +444,33 @@ function gmstDegrees(date: Date): number {
   let gmst = 280.46061837 + 360.98564736629 * (jd - 2451545.0) + 0.000387933 * T * T;
   gmst = gmst % 360;
   return gmst < 0 ? gmst + 360 : gmst;
+}
+
+/** Lerps ECEF positions between two computed sets (previous/next SGP4
+ *  propagation) by array index. Satellite order is stable frame-to-frame
+ *  (same TLE list, same iteration order), so index-matching is safe there;
+ *  aircraft can appear/disappear between updates, so a length mismatch just
+ *  falls back to the newer set for the tail rather than interpolating
+ *  mismatched entries. */
+function interpolatePositions(
+  prev: { pos: { x: number; y: number; z: number } }[],
+  next: { pos: { x: number; y: number; z: number } }[],
+  t: number,
+): { pos: { x: number; y: number; z: number } }[] {
+  if (prev.length !== next.length) return next;
+  const out = new Array<{ pos: { x: number; y: number; z: number } }>(next.length);
+  for (let i = 0; i < next.length; i++) {
+    const a = prev[i].pos;
+    const b = next[i].pos;
+    out[i] = {
+      pos: {
+        x: a.x + (b.x - a.x) * t,
+        y: a.y + (b.y - a.y) * t,
+        z: a.z + (b.z - a.z) * t,
+      },
+    };
+  }
+  return out;
 }
 
 /** ECEF (km) -> Three.js scene position, accounting for the Earth mesh's own
