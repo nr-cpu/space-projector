@@ -7,6 +7,10 @@ const SERVER = process.env.SERVER_URL ?? "http://localhost:3000";
 const TRACKER = process.env.TRACKER_URL ?? "http://localhost:3001";
 
 export default defineConfig({
+  // GitHub Pages serves a project repo from /<repo-name>/, not the domain
+  // root — set via PAGES_BASE in the Pages deploy workflow only; local dev
+  // and the real appliance server both serve from / and are unaffected.
+  base: process.env.PAGES_BASE ?? "/",
   plugins: [react()],
   resolve: {
     alias: { "@shared": SHARED },

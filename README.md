@@ -9,6 +9,14 @@
 </p>
 
 <p align="center">
+  <a href="https://nr-cpu.github.io/space-projector/"><b>▶ Live static preview</b></a>
+  <br><sub>Renders real astronomy (stars, planets, Milky Way) client-side with no setup, but this preview has no
+  backend — it can't show live aircraft, live satellite tracking, or the orbital pullback view's TLE data, and
+  settings don't persist. For the real thing (radio/API aircraft feed, satellite tracking, control panel), clone
+  the repo and run it yourself — see Quick start below.</sub>
+</p>
+
+<p align="center">
   <a href="https://skylightceiling.com"><b>🛰️ Get notified when I launch on a crowdfunding platform → skylightceiling.com</b></a>
   <br><sub>A ready-made kit is coming. Join the waitlist for early access &amp; launch pricing.</sub>
 </p>

@@ -115,34 +115,37 @@ export function Display() {
     return () => window.removeEventListener("keydown", onKey);
   }, [conn]);
 
-  // Sky zoom (scroll wheel / pinch) + pan (click-drag), for exploring the
-  // satellite field. Only meaningful in "sky" projection mode; a no-op
-  // otherwise since "map" mode has no az/alt dome to zoom into.
+  // Sky zoom (scroll wheel / trackpad pinch) + pan (click-drag, OR a two-
+  // finger trackpad swipe), for exploring the satellite field. Only
+  // meaningful in "sky" projection mode; a no-op otherwise since "map" mode
+  // has no az/alt dome to zoom into.
+  //
+  // Browsers report trackpad pinch-to-zoom as a wheel event with
+  // ctrlKey=true (synthetic — no actual Ctrl key involved); a two-finger
+  // swipe is a plain wheel event with real deltaX/deltaY and ctrlKey=false.
+  // That's the only reliable signal to tell the two gestures apart from a
+  // wheel event alone (there's no separate "pan" gesture type on the web).
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    const onWheel = (e: WheelEvent) => {
+    const applyZoomDelta = (dy: number) => {
       const c = configRef.current;
-      if (c.projectionMode !== "sky") return;
-      e.preventDefault();
-      rendererRef.current?.noteInteraction();
-
       // Already pulled back into orbital view: scrolling further out eases
       // pullback toward 1 (whole Earth); scrolling in eases it back toward
       // 0, and once it reaches 0 control returns to the normal sky zoom —
       // one continuous gesture across the boundary, not two disconnected
       // controls.
       if (pullbackRef.current > 0) {
-        const next = Math.max(0, Math.min(1, pullbackRef.current + e.deltaY * 0.0009));
+        const next = Math.max(0, Math.min(1, pullbackRef.current + dy * 0.0009));
         pullbackRef.current = next;
         setPullback(next);
         if (next > 0) return;
       }
 
-      const factor = Math.exp(-e.deltaY * 0.0015);
+      const factor = Math.exp(-dy * 0.0015);
       const nextZoom = c.skyZoom * factor;
-      if (nextZoom < 1 && e.deltaY > 0) {
+      if (nextZoom < 1 && dy > 0) {
         // Crossed the dome's zoom floor while still scrolling out: hand off
         // to the orbital pullback instead of clamping at 1x forever.
         conn.patchConfig({ skyZoom: 1 });
@@ -152,6 +155,38 @@ export function Display() {
         return;
       }
       conn.patchConfig({ skyZoom: Math.max(1, Math.min(40, nextZoom)) });
+    };
+
+    const applyPanDelta = (dx: number, dy: number) => {
+      const c = configRef.current;
+      if (c.skyZoom <= 1) return; // nothing to pan around at the resting view
+      const degPerPx = 0.15 / c.skyZoom;
+      const nextAz = ((c.skyPanAz + dx * degPerPx) % 360 + 360) % 360;
+      const nextAlt = Math.max(-10, Math.min(90, c.skyPanAlt + dy * degPerPx));
+      conn.patchConfig({ skyPanAz: nextAz, skyPanAlt: nextAlt });
+    };
+
+    const onWheel = (e: WheelEvent) => {
+      const c = configRef.current;
+      if (c.projectionMode !== "sky") return;
+      e.preventDefault();
+      rendererRef.current?.noteInteraction();
+
+      // Vertical scroll/swipe zooms (the universal map-app convention) —
+      // except Shift+scroll, which pans vertically instead, since a plain
+      // vertical two-finger trackpad swipe and a mouse wheel produce near-
+      // identical events and can't both mean "zoom" and "pan" at once.
+      // A real horizontal swipe component (no modifier needed) pans
+      // horizontally either way.
+      if (e.shiftKey) {
+        applyPanDelta(0, e.deltaY || e.deltaX);
+        return;
+      }
+      if (!e.ctrlKey && Math.abs(e.deltaX) > Math.abs(e.deltaY) * 0.6) {
+        applyPanDelta(e.deltaX, 0);
+        return;
+      }
+      applyZoomDelta(e.deltaY);
     };
 
     let dragging = false;
