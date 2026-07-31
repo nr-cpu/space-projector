@@ -8,6 +8,7 @@ import type {
   ServerMessage,
   SourceStatus,
 } from "@shared/index.js";
+import { DEFAULT_CONFIG } from "@shared/index.js";
 
 export interface StreamState {
   connected: boolean;
@@ -99,9 +100,20 @@ export class Connection {
   }
 
   patchConfig(patch: Partial<Config>): void {
+    // Apply optimistically to local state immediately, regardless of
+    // connection state — a live server (when present) still receives the
+    // same patch and remains authoritative (its "config" reply overwrites
+    // this local guess, keeping multiple viewers/the control panel in sync),
+    // but a single disconnected viewer — the static/backend-less preview, or
+    // any truly standalone deployment — must stay fully interactive on its
+    // own rather than silently no-op every zoom/pan/toggle because nothing
+    // ever echoes back. Config a display renders from should never depend on
+    // a network round-trip completing.
+    this.update({ config: { ...(this.state.config ?? DEFAULT_CONFIG), ...patch } });
     this.send({ type: "patchConfig", patch });
   }
   resetConfig(): void {
+    this.update({ config: DEFAULT_CONFIG });
     this.send({ type: "resetConfig" });
   }
 
