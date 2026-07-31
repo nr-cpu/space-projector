@@ -86,6 +86,7 @@ export function Display() {
           break;
         case "0":
           // Reset sky zoom/pan to the full-hemisphere default view.
+          rendererRef.current?.noteInteraction();
           conn.patchConfig({ skyZoom: 1, skyPanAz: 0, skyPanAlt: 90 });
           break;
       }
@@ -105,6 +106,7 @@ export function Display() {
       const c = configRef.current;
       if (c.projectionMode !== "sky") return;
       e.preventDefault();
+      rendererRef.current?.noteInteraction();
       const factor = Math.exp(-e.deltaY * 0.0015);
       const nextZoom = Math.max(1, Math.min(40, c.skyZoom * factor));
       conn.patchConfig({ skyZoom: nextZoom });
@@ -117,6 +119,7 @@ export function Display() {
     const onPointerDown = (e: PointerEvent) => {
       const c = configRef.current;
       if (c.projectionMode !== "sky" || c.skyZoom <= 1) return;
+      rendererRef.current?.noteInteraction();
       dragging = true;
       lastX = e.clientX;
       lastY = e.clientY;
@@ -157,6 +160,7 @@ export function Display() {
     const onDoubleClick = () => {
       const c = configRef.current;
       if (c.projectionMode !== "sky") return;
+      rendererRef.current?.noteInteraction();
       conn.patchConfig({ skyZoom: 1, skyPanAz: 0, skyPanAlt: 90 });
     };
 
@@ -215,7 +219,15 @@ export function Display() {
         </div>
       )}
       {!state.connected && <div className="reconnect">connecting…</div>}
-      {cfg && <QuickSettings cfg={cfg} patch={conn.patchConfig.bind(conn)} />}
+      {cfg && (
+        <QuickSettings
+          cfg={cfg}
+          patch={(patch) => {
+            rendererRef.current?.noteInteraction();
+            conn.patchConfig(patch);
+          }}
+        />
+      )}
       {hover && (
         <div className="hover-tip" style={{ left: hover.x, top: hover.y }}>
           {hover.label}

@@ -40,6 +40,11 @@ export interface SkyBody {
   mag?: number;
   illum?: number; // moon lit fraction 0..1
   waning?: boolean;
+  /** Apparent angular velocity, degrees/second (satellites only) — lets the
+   *  renderer draw a short motion trail without a second orbit propagation
+   *  per object per frame. */
+  velAz?: number;
+  velAlt?: number;
 }
 
 /** A simulated meteor streak: a start point, a heading, and an angular length
@@ -337,6 +342,18 @@ function cometAltAz(
  *  shower's current activity fraction and ZHR. */
 const METEOR_BASE_INTERVAL_MS = 45_000;
 
+/**
+ * Sporadic background rate — real dark skies show a handful of meteors per
+ * hour even with no named shower active (random debris, not tied to any
+ * radiant). Without this, computeSky produces zero meteors on most nights of
+ * the year (only ~12 short shower windows), which reads as "broken" for an
+ * ambient display. Tuned brighter than the real ~5-8/hr dark-sky rate so it's
+ * actually noticed rather than technically-present-but-invisible; it's still
+ * a real, always-true astronomical fact (sporadics happen every night), just
+ * turned up for visibility the way the satellite/star layers already are.
+ */
+const SPORADIC_INTERVAL_MS = 25_000; // expected interval between sporadic streaks
+
 let meteorRngSeed = Date.now() % 2147483647;
 function meteorRandom(): number {
   meteorRngSeed = (meteorRngSeed * 16807) % 2147483647;
@@ -374,6 +391,7 @@ function stepMeteors(
   // depend on render frame rate.
   if (nowMs - lastMeteorSpawnCheck > 1000) {
     const elapsedFrac = (nowMs - lastMeteorSpawnCheck) / METEOR_BASE_INTERVAL_MS;
+    const sporadicElapsedFrac = (nowMs - lastMeteorSpawnCheck) / SPORADIC_INTERVAL_MS;
     lastMeteorSpawnCheck = nowMs;
     for (const { shower, fraction } of showers) {
       const radiant = radiantAltAz(shower, date, latDeg, lonDeg);
@@ -395,6 +413,22 @@ function stepMeteors(
           lifeMs: 220 + meteorRandom() * 260, // a real meteor streak is brief
         });
       }
+    }
+    // Sporadics: no radiant, no shower — a random meteor anywhere above the
+    // horizon, traveling a random direction. Real, nightly, background rate.
+    if (meteorRandom() < sporadicElapsedFrac) {
+      const startAz = meteorRandom() * 360;
+      const startAlt = 15 + meteorRandom() * 60;
+      const heading = meteorRandom() * 360;
+      liveMeteors.push({
+        id: `sporadic-${nowMs}-${Math.floor(meteorRandom() * 1e6)}`,
+        shower: "sporadic",
+        az0: startAz,
+        alt0: startAlt,
+        headingDeg: heading,
+        spawnedAt: nowMs,
+        lifeMs: 220 + meteorRandom() * 260,
+      });
     }
   }
 
@@ -509,6 +543,12 @@ export function computeSky(date: Date, latDeg: number, lonDeg: number, o: SkyOpt
       latitude: latDeg * DEG,
       height: 0,
     };
+    // Small look-ahead for an analytic angular velocity (trail direction +
+    // speed) without a second full sky computation — one extra propagate()
+    // per satellite, same cost class as the position call itself.
+    const VEL_DT_S = 2;
+    const dateAhead = new Date(date.getTime() + VEL_DT_S * 1000);
+    const gmstAhead = satellite.gstime(dateAhead);
     for (const tle of o.tles) {
       const rec = getSatrec(tle);
       if (!rec) continue;
@@ -519,12 +559,31 @@ export function computeSky(date: Date, latDeg: number, lonDeg: number, o: SkyOpt
       const look = satellite.ecfToLookAngles(observerGd, ecf);
       const alt = look.elevation * R2D;
       if (alt < 0) continue; // below horizon
+      const az = norm360(look.azimuth * R2D);
+
+      let velAz: number | undefined;
+      let velAlt: number | undefined;
+      const pvAhead = satellite.propagate(rec, dateAhead);
+      const posAhead = pvAhead?.position;
+      if (posAhead && typeof posAhead !== "boolean") {
+        const ecfAhead = satellite.eciToEcf(posAhead, gmstAhead);
+        const lookAhead = satellite.ecfToLookAngles(observerGd, ecfAhead);
+        const altAhead = lookAhead.elevation * R2D;
+        const azAhead = norm360(lookAhead.azimuth * R2D);
+        // Shortest-path azimuth delta (handles the 359°->1° wrap).
+        const dAz = ((azAhead - az + 540) % 360) - 180;
+        velAz = dAz / VEL_DT_S;
+        velAlt = (altAhead - alt) / VEL_DT_S;
+      }
+
       const isISS = /\bISS\b|\bZARYA\b/i.test(tle.name);
       sky.sats.push({
         kind: isISS ? "iss" : "satellite",
         name: tle.name.replace(/\s*\(.*\)\s*$/, "").trim(),
-        az: norm360(look.azimuth * R2D),
+        az,
         alt,
+        velAz,
+        velAlt,
       });
     }
   }

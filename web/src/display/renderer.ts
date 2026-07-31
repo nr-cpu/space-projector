@@ -228,6 +228,25 @@ export class Renderer {
   /** Hoverable on-screen things, rebuilt every frame — see hitTest(). */
   private hoverTargets: HoverTarget[] = [];
 
+  // --- idle auto-drift ("screensaver" satellite watching) ---
+  /** rAF-clock timestamp of the last user interaction (zoom/pan/hover). */
+  private lastInteractionAt = performance.now();
+  /** Currently-animated effective zoom/pan while idle-drifting; null = use
+   *  the real config values directly (either not idle yet, or no target). */
+  private driftZoom: number | null = null;
+  private driftPanAz = 0;
+  private driftPanAlt = 90;
+  private driftTargetAz = 0;
+  private driftTargetAlt = 90;
+  private driftHoldUntil = 0;
+  /** This frame's effective (zoom, panAz, panAlt) — computed once per draw()
+   *  call so projectSky/inSkyView (called many times per frame) don't each
+   *  recompute the idle-drift ease. */
+  private frameView = { zoom: 1, panAz: 0, panAlt: 90 };
+  /** Target zoom for the current drift hold — picked once per target (see
+   *  pickDriftZoom), not per frame. */
+  private driftTargetZoom = 8;
+
   // Sky layer state.
   private tles: Tle[] = [];
   private comets: CometElements[] = [];
@@ -424,6 +443,108 @@ export class Renderer {
     );
   }
 
+  /** Call on any zoom/pan/pointer interaction — resets the idle clock so
+   *  auto-drift waits again before taking over, and immediately hands
+   *  control back to the real config values if a drift was in progress. */
+  noteInteraction(): void {
+    this.lastInteractionAt = performance.now();
+    this.driftZoom = null;
+  }
+
+  /** Idle time before auto-drift engages, ms. */
+  private static readonly DRIFT_IDLE_MS = 25_000;
+  /** How long to hold on one satellite before picking a new target, ms. */
+  private static readonly DRIFT_HOLD_MS = 14_000;
+  /** Keep this many satellites in frame while drifting — enough that it
+   *  reads as "watching a cluster pass overhead," not a single isolated dot
+   *  (too tight) or back to the full, busy hemisphere (too loose). */
+  private static readonly DRIFT_TARGET_SAT_COUNT = [5, 10] as const;
+  /** Fallback zoom if satellite density can't fill the target count even at
+   *  the sparsest reasonable framing (e.g. very few satellites above the
+   *  horizon right now). */
+  private static readonly DRIFT_ZOOM_FALLBACK = 8;
+
+  /** Highest zoom (smallest field) that still keeps at least `minCount`
+   *  satellites within the frame around (targetAz, targetAlt). Scans a fixed
+   *  set of candidate zooms rather than solving analytically — cheap at a
+   *  few thousand satellites, run only once per drift-target pick (every
+   *  DRIFT_HOLD_MS), not per frame. */
+  private pickDriftZoom(targetAz: number, targetAlt: number): number {
+    const [minCount, maxCount] = Renderer.DRIFT_TARGET_SAT_COUNT;
+    const candidateZooms = [3, 4, 6, 8, 10, 13, 16, 20, 25];
+    let best = Renderer.DRIFT_ZOOM_FALLBACK;
+    // Walk from tightest to widest; stop at the first (highest) zoom whose
+    // field already contains at least minCount — that's the closest framing
+    // that still satisfies "don't zoom in so far it's 1-2 satellites."
+    for (let i = candidateZooms.length - 1; i >= 0; i--) {
+      const zoom = candidateZooms[i];
+      const fieldRadius = 90 / zoom;
+      let count = 0;
+      for (const s of this.sky.sats) {
+        if (angularSeparationDeg(targetAz, targetAlt, s.az, s.alt) <= fieldRadius) {
+          count++;
+          if (count >= maxCount) break;
+        }
+      }
+      if (count >= minCount) {
+        best = zoom;
+        break;
+      }
+      best = zoom; // sparsest satellites: fall back to the widest scanned
+    }
+    return best;
+  }
+
+  /**
+   * While idle with satellites on, ease the effective view toward whichever
+   * tracked satellite currently sits at a comfortable elevation (not
+   * straight overhead, where apparent motion is fastest and least
+   * watchable) — genuine screensaver behavior. Any interaction cancels it
+   * instantly (see noteInteraction). Returns the (zoom, panAz, panAlt) to
+   * actually render this frame.
+   */
+  private effectiveSkyView(cfg: Config, now: number): { zoom: number; panAz: number; panAlt: number } {
+    const real = { zoom: cfg.skyZoom, panAz: cfg.skyPanAz, panAlt: cfg.skyPanAlt };
+    if (cfg.projectionMode !== "sky" || !cfg.showSatellites) return real;
+    const idleMs = now - this.lastInteractionAt;
+    if (idleMs < Renderer.DRIFT_IDLE_MS) return real;
+
+    // Only take over once the user's own view is already at the resting
+    // (zoom=1) state — don't fight a manual zoom/pan left in place.
+    if (cfg.skyZoom > 1.01) return real;
+
+    if (this.driftZoom == null || now > this.driftHoldUntil) {
+      // Pick a new target: prefer a satellite in a pleasant 25-65° elevation
+      // band (visible, moving at a watchable rate, not near the horizon
+      // haze or the fast-moving zenith point); fall back to the highest
+      // available if none are in that band.
+      const candidates = this.sky.sats;
+      let target = candidates.find((s) => s.alt >= 25 && s.alt <= 65);
+      if (!target && candidates.length) {
+        target = candidates.reduce((a, b) => (b.alt > a.alt ? b : a));
+      }
+      if (target) {
+        this.driftTargetAz = target.az;
+        this.driftTargetAlt = target.alt;
+        this.driftTargetZoom = this.pickDriftZoom(target.az, target.alt);
+      }
+      this.driftHoldUntil = now + Renderer.DRIFT_HOLD_MS;
+      if (this.driftZoom == null) {
+        this.driftZoom = 1;
+        this.driftPanAz = cfg.skyPanAz;
+        this.driftPanAlt = cfg.skyPanAlt;
+      }
+    }
+    if (this.sky.sats.length) {
+      const ease = 0.02;
+      this.driftZoom += (this.driftTargetZoom - this.driftZoom) * ease;
+      this.driftPanAz = lerpAzimuth(this.driftPanAz, this.driftTargetAz, ease);
+      this.driftPanAlt += (this.driftTargetAlt - this.driftPanAlt) * ease;
+      return { zoom: this.driftZoom, panAz: this.driftPanAz, panAlt: this.driftPanAlt };
+    }
+    return real;
+  }
+
   /** Nearest hoverable within its hit radius (screen px, canvas-relative),
    *  or null. Called from pointermove on the canvas element. */
   hitTest(x: number, y: number): string | null {
@@ -466,6 +587,7 @@ export class Renderer {
     };
 
     this.updateSky(cfg, now);
+    this.frameView = this.effectiveSkyView(cfg, now);
     this.drawSky(cfg, proj);
     this.drawOverlays(cfg, proj);
     if (cfg.showAirport) this.drawAirport(cfg, proj);
@@ -811,27 +933,23 @@ export class Renderer {
   }
 
   /** Place an (azimuth, altitude) sky point on the field, honoring the
-   *  current zoom/pan. Zoom=1 + pan centered on zenith = full-hemisphere
-   *  view (unchanged legacy behavior). */
+   *  current zoom/pan (this.frameView — either the real config values, or
+   *  the idle auto-drift's animated view; see effectiveSkyView). Zoom=1 +
+   *  pan centered on zenith = full-hemisphere view (unchanged legacy
+   *  behavior). */
   private projectSky(az: number, alt: number, cfg: Config, proj: ProjOpts): Point {
-    return projectSkyPointZoomed(
-      az,
-      alt,
-      cfg.skyPanAz,
-      cfg.skyPanAlt,
-      cfg.skyZoom,
-      proj,
-      this.horizonM(cfg),
-    );
+    const v = this.frameView;
+    return projectSkyPointZoomed(az, alt, v.panAz, v.panAlt, v.zoom, proj, this.horizonM(cfg));
   }
 
   /** Whether a sky point at (az, alt) currently falls within the visible
    *  zoomed/panned field (a bit past the edge, for labels whose anchor is
    *  offset outward from the object). */
-  private inSkyView(az: number, alt: number, cfg: Config): boolean {
-    if (cfg.skyZoom <= 1) return true;
-    const sep = angularSeparationDeg(cfg.skyPanAz, cfg.skyPanAlt, az, alt);
-    return sep <= 90 / cfg.skyZoom + 3;
+  private inSkyView(az: number, alt: number, _cfg: Config): boolean {
+    const v = this.frameView;
+    if (v.zoom <= 1) return true;
+    const sep = angularSeparationDeg(v.panAz, v.panAlt, az, alt);
+    return sep <= 90 / v.zoom + 3;
   }
 
   private drawSky(cfg: Config, proj: ProjOpts): void {
@@ -906,7 +1024,12 @@ export class Renderer {
             priority: mag,
           });
         }
-        this.hoverTargets.push({ x: p.x, y: p.y, r: Math.max(6, size + 4), label: s.name ? `${s.name} · star` : "star" });
+        this.hoverTargets.push({
+          x: p.x,
+          y: p.y,
+          r: Math.max(6, size + 4),
+          label: `${s.name ? `${s.name} · star` : "star"}\nmag ${mag.toFixed(1)}`,
+        });
       }
     }
 
@@ -946,18 +1069,71 @@ export class Renderer {
             priority: mag,
           });
         }
-        this.hoverTargets.push({ x: p.x, y: p.y, r: Math.max(8, size + 5), label: `${pl.name} · planet` });
+        this.hoverTargets.push({
+          x: p.x,
+          y: p.y,
+          r: Math.max(8, size + 5),
+          label: `${pl.name} · planet\nmag ${mag.toFixed(1)}`,
+        });
       }
     }
 
     if (cfg.showSatellites && this.sky.sats.length) {
+      // Trail length is fixed in on-screen angular extent, not real seconds
+      // of travel — otherwise the same TRAIL_SEC that looks right at zoom=1
+      // stretches into a line spanning most of the frame once the idle-drift
+      // zoom (up to 18x) magnifies that same angular length proportionally.
+      const zoomNow = this.frameView.zoom;
+      const trailDegOnScreen = 5; // constant apparent length, any zoom level
+      // Zoomed-in objects (idle drift focuses on one satellite) read as a
+      // real subject rather than a persistent pinprick when they're drawn
+      // bigger — scale dot size (and glow) up with zoom, capped so it never
+      // looks like a UI blob.
+      const zoomSizeBoost = Math.min(3, Math.sqrt(zoomNow));
+
       for (const sat of this.sky.sats) {
         // At scale (thousands of satellites), skip drawing anything outside
         // the current zoom/pan field entirely rather than just its label.
         if (!this.inSkyView(sat.az, sat.alt, cfg)) continue;
         const p = this.projectSky(sat.az, sat.alt, cfg, proj);
         const iss = sat.kind === "iss";
-        const size = iss ? 3 : 1.6;
+        const size = (iss ? 3 : 1.6) * zoomSizeBoost;
+
+        // Motion trail: a short fading line behind the satellite along its
+        // real apparent travel direction (velAz/velAlt, computed once in
+        // computeSky — no extra per-frame orbit math here). Reads as a
+        // moving light rather than a static dot, without needing a history
+        // buffer the way aircraft trails do.
+        if (sat.velAz != null && sat.velAlt != null) {
+          const speed = Math.hypot(sat.velAz, sat.velAlt);
+          if (speed > 0.01) {
+            // Clamp both ends: a floor so fast/zoomed objects still show a
+            // visible sliver, and a ceiling so slow-appearing satellites
+            // (near the horizon, where angular speed drops toward zero)
+            // don't chase an unreachable apparent length into a trail
+            // spanning real minutes of travel.
+            const trailSec = Math.min(8, Math.max(0.5, trailDegOnScreen / (speed * Math.max(1, zoomNow))));
+            const behindAz = sat.az - sat.velAz * trailSec;
+            const behindAlt = sat.alt - sat.velAlt * trailSec;
+            if (this.inSkyView(behindAz, behindAlt, cfg)) {
+              const tail = this.projectSky(behindAz, behindAlt, cfg, proj);
+              const grad = ctx.createLinearGradient(tail.x, tail.y, p.x, p.y);
+              const trailCol = iss ? "140,255,214" : "180,205,255";
+              grad.addColorStop(0, `rgba(${trailCol},0)`);
+              grad.addColorStop(1, `rgba(${trailCol},${(iss ? 0.5 : 0.32) * b})`);
+              ctx.save();
+              ctx.strokeStyle = grad;
+              ctx.lineWidth = iss ? 1.6 : 1;
+              ctx.lineCap = "round";
+              ctx.beginPath();
+              ctx.moveTo(tail.x, tail.y);
+              ctx.lineTo(p.x, p.y);
+              ctx.stroke();
+              ctx.restore();
+            }
+          }
+        }
+
         ctx.beginPath();
         ctx.arc(p.x, p.y, size, 0, Math.PI * 2);
         if (iss) {
@@ -966,13 +1142,17 @@ export class Renderer {
           ctx.shadowBlur = 10;
         } else {
           // Real satellites vary noticeably in brightness as their attitude
-          // and solar panels catch the light — a slow per-object flicker
+          // and solar panels catch the light — a slow per-object pulse
           // (phase-offset by az so they don't all pulse in lockstep) reads
           // as that same tumble/glint rather than a flat grid of dots. A
           // faint warm tint (vs. the cool star-blue) also helps them read as
           // a distinct population at a glance, not just more stars.
           const tw = 0.55 + 0.45 * Math.sin(this.frameT * 1.1 + sat.az * 3.7);
           ctx.fillStyle = `rgba(210,225,255,${0.55 * b * tw})`;
+          if (tw > 0.75) {
+            ctx.shadowColor = `rgba(210,225,255,${(tw - 0.75) * 2 * b})`;
+            ctx.shadowBlur = size * 3;
+          }
         }
         ctx.fill();
         ctx.shadowBlur = 0;
@@ -999,7 +1179,7 @@ export class Renderer {
           x: p.x,
           y: p.y,
           r: Math.max(6, size + 4),
-          label: iss ? "ISS" : sat.name ? `${sat.name} · satellite` : "satellite",
+          label: `${iss ? "ISS" : sat.name ? `${sat.name} · satellite` : "satellite"}\n${Math.round(sat.alt)}° elevation`,
         });
       }
     }
@@ -1074,7 +1254,7 @@ export class Renderer {
     for (const { az, alt } of this.sky.milkyWay) {
       if (alt < -15) continue;
       const a = Math.max(alt, -2);
-      if (!inZoomedSkyField(az, a, cfg.skyPanAz, cfg.skyPanAlt, cfg.skyZoom)) continue;
+      if (!inZoomedSkyField(az, a, this.frameView.panAz, this.frameView.panAlt, this.frameView.zoom)) continue;
       pts.push(this.projectSky(az, a, cfg, proj));
     }
     if (pts.length < 2) return;
@@ -1102,7 +1282,7 @@ export class Renderer {
     cfg: Config,
   ): boolean {
     if (cfg.satelliteLabelRadiusDeg <= 0) return true;
-    const sep = angularSeparationDeg(cfg.skyPanAz, cfg.skyPanAlt, sat.az, sat.alt);
+    const sep = angularSeparationDeg(this.frameView.panAz, this.frameView.panAlt, sat.az, sat.alt);
     return sep <= cfg.satelliteLabelRadiusDeg;
   }
 
@@ -1302,7 +1482,7 @@ export class Renderer {
         const f = i / steps;
         const az = lerpAzimuth(v.sky.az, destAz, f);
         const elev = v.sky.elev * (1 - f * f);
-        if (!inZoomedSkyField(az, elev, cfg.skyPanAz, cfg.skyPanAlt, cfg.skyZoom)) break;
+        if (!inZoomedSkyField(az, elev, this.frameView.panAz, this.frameView.panAlt, this.frameView.zoom)) break;
         pts.push(this.projectSky(az, elev, cfg, proj));
       }
     } else {
