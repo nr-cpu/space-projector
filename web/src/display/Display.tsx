@@ -15,6 +15,15 @@ export function Display() {
   const ambient = useAmbientMode();
   const isKiosk = kioskRequested();
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  // Wheel (zoom/pan) listens here, not on the ground canvas — the canvas gets
+  // pointer-events:none the instant the orbital view takes over (see the
+  // render below), which makes it untargetable by the browser's event hit-
+  // testing regardless of what's registered on it via addEventListener. Since
+  // scrolling has to keep working continuously across the ground<->orbital
+  // boundary (one gesture, not two disconnected controls — see applyZoomDelta),
+  // the listener needs a home that's always hit-testable no matter which view
+  // is showing.
+  const rootRef = useRef<HTMLDivElement>(null);
   const rendererRef = useRef<Renderer | null>(null);
   const [hover, setHover] = useState<{ x: number; y: number; label: string } | null>(null);
   // 0 = ground dome view (unchanged); 1 = fully pulled back to orbital view.
@@ -28,6 +37,11 @@ export function Display() {
   // orbital view takes over, even though the canvas element (and its
   // listeners) stay mounted underneath.
   const orbitalActiveRef = useRef(false);
+  // Latches true the first time pullback ever leaves 0, so OrbitalView mounts
+  // (and starts its WebGL setup + texture fetch) as soon as the user starts
+  // scrolling out, well before the hard cutoff needs it visible — never unmounts
+  // again after that, so re-crossing the boundary later is instant.
+  const everEnteredOrbitalRef = useRef(false);
   const [tles, setTles] = useState<Tle[]>([]);
 
   // Keep the latest config in a ref so the RAF loop always reads fresh values.
@@ -133,7 +147,17 @@ export function Display() {
   // wheel event alone (there's no separate "pan" gesture type on the web).
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    const root = rootRef.current;
+    if (!canvas || !root) return;
+
+    // Marks OrbitalView for mounting (see the render below) the first time
+    // pullback goes positive, and updates both the ref (read by the RAF-driven
+    // camera math) and the state (drives the React re-render).
+    const updatePullback = (next: number) => {
+      pullbackRef.current = next;
+      if (next > 0) everEnteredOrbitalRef.current = true;
+      setPullback(next);
+    };
 
     const applyZoomDelta = (dy: number) => {
       const c = configRef.current;
@@ -144,8 +168,7 @@ export function Display() {
       // controls.
       if (pullbackRef.current > 0) {
         const next = Math.max(0, Math.min(1, pullbackRef.current + dy * 0.0009));
-        pullbackRef.current = next;
-        setPullback(next);
+        updatePullback(next);
         if (next > 0) return;
       }
 
@@ -156,8 +179,7 @@ export function Display() {
         // to the orbital pullback instead of clamping at 1x forever.
         conn.patchConfig({ skyZoom: 1 });
         const next = Math.min(1, (1 - nextZoom) * 1.5);
-        pullbackRef.current = next;
-        setPullback(next);
+        updatePullback(next);
         return;
       }
       conn.patchConfig({ skyZoom: Math.max(1, Math.min(40, nextZoom)) });
@@ -252,7 +274,7 @@ export function Display() {
       conn.patchConfig({ skyZoom: 1, skyPanAz: 0, skyPanAlt: 90 });
     };
 
-    canvas.addEventListener("wheel", onWheel, { passive: false });
+    root.addEventListener("wheel", onWheel, { passive: false });
     canvas.addEventListener("pointerdown", onPointerDown);
     canvas.addEventListener("pointermove", onPointerMove);
     canvas.addEventListener("pointerup", onPointerUp);
@@ -260,7 +282,7 @@ export function Display() {
     canvas.addEventListener("pointerleave", onPointerLeave);
     canvas.addEventListener("dblclick", onDoubleClick);
     return () => {
-      canvas.removeEventListener("wheel", onWheel);
+      root.removeEventListener("wheel", onWheel);
       canvas.removeEventListener("pointerdown", onPointerDown);
       canvas.removeEventListener("pointermove", onPointerMove);
       canvas.removeEventListener("pointerup", onPointerUp);
@@ -312,14 +334,20 @@ export function Display() {
   const cfg = state.config ?? DEFAULT_CONFIG;
   const offline = !state.connected;
   return (
-    <div className="display-root">
+    <div className="display-root" ref={rootRef}>
       <canvas
         ref={canvasRef}
         className="display-canvas"
         style={showOrbital ? { visibility: "hidden", pointerEvents: "none" } : undefined}
       />
-      {showOrbital && (
-        <div className="orbital-overlay">
+      {/* Mounted once pullback ever starts (not gated on showOrbital) and kept
+          mounted thereafter — remounting on every threshold crossing would
+          rebuild the WebGL context and re-fetch the Earth texture from
+          scratch each time, which is what made the ground-to-orbital
+          transition feel like it hung. Visibility is toggled with CSS
+          instead, same as the ground canvas above. */}
+      {everEnteredOrbitalRef.current && (
+        <div className="orbital-overlay" style={showOrbital ? undefined : { visibility: "hidden", pointerEvents: "none" }}>
           <OrbitalView
             cfg={cfg}
             tles={tles}

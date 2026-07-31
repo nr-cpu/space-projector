@@ -143,24 +143,71 @@ export function OrbitalView({ cfg, tles, aircraft, pullback, onHover }: OrbitalV
     ro.observe(container);
 
     let earthRotation = 0;
+    // Real sidereal rotation (~360°/day) is imperceptible over a viewing
+    // session — the whole point of pulling back to the orbital view is to
+    // *watch* the Earth turn from day to night with satellites floating
+    // overhead, so once pulled back far enough this speeds the visual spin
+    // up to something watchable while satellites/observer marker stay in
+    // registration with it (they're positioned from this same angle — see
+    // ecefToScene calls below). The sun stays fixed in the scene, so a
+    // faster spin produces a correspondingly faster day/night terminator for
+    // free, the same mechanism as the real thing. Near the ground-dome
+    // boundary (pullback close to 0) this still tracks real GMST, so the
+    // hard cut from the 2D dome doesn't visibly jump the globe's orientation.
+    const VISUAL_DEG_PER_SEC = 3; // one full visible rotation every 2 minutes
+    let visualRotationDeg = gmstDegrees(new Date());
+    let lastVisualTick = performance.now();
+    // Re-propagating thousands of TLEs via full SGP4 is expensive — at 60fps
+    // that's ~10k satellite propagations/second, which is enough sustained
+    // CPU + GC pressure (new arrays every frame) to visibly stall the tab
+    // during a scroll gesture. Satellite motion is slow at visual timescales
+    // (LEO satellites move a barely-perceptible amount over a few hundred ms),
+    // so recomputing positions only a few times a second is indistinguishable
+    // to the eye but cuts that cost by ~10-20x. The Earth's own rotation and
+    // the camera move still update every frame, so the view stays smooth.
+    const SAT_UPDATE_INTERVAL_MS = 300;
+    let lastSatUpdate = 0;
     const loop = () => {
       stateRef.current!.raf = requestAnimationFrame(loop);
       const c = cfgRef.current;
+      const now = performance.now();
 
-      // Earth's real sidereal rotation, applied to the mesh — satellite/
-      // aircraft ECEF positions are Earth-fixed, so rotating the globe
-      // under them (rather than transforming every point) keeps everything
-      // in registration automatically.
-      earthRotation = THREE.MathUtils.degToRad(gmstDegrees(new Date()));
+      // Advance the sped-up visual angle at a constant rate regardless of
+      // pullback (so it's already caught up and spinning smoothly the
+      // instant pullback crosses into "watch it turn" territory, rather than
+      // restarting from a standstill).
+      const dtSec = (now - lastVisualTick) / 1000;
+      lastVisualTick = now;
+      visualRotationDeg = (visualRotationDeg + VISUAL_DEG_PER_SEC * dtSec) % 360;
+
+      // Blend real GMST (accurate registration right at the dome boundary)
+      // toward the fast visual spin as pullback increases, so the globe's
+      // orientation doesn't jump the instant the hard cut happens.
+      const realDeg = gmstDegrees(new Date());
+      const blend = THREE.MathUtils.smoothstep(pullbackRef.current, 0.15, 0.5);
+      const shownDeg = THREE.MathUtils.lerp(realDeg, visualRotationDeg, blend);
+
+      // Earth's rotation, applied to the mesh — satellite/aircraft ECEF
+      // positions are Earth-fixed, so rotating the globe under them (rather
+      // than transforming every point) keeps everything in registration
+      // automatically, whichever rotation rate is in effect.
+      earthRotation = THREE.MathUtils.degToRad(shownDeg);
       earth.rotation.y = earthRotation;
       stars.rotation.y = 0; // starfield stays fixed (inertial), Earth spins under it
 
-      updatePoints(satPoints, orbitalSatellites(tlesRef.current, new Date()), earthRotation);
-      updatePoints(
-        acPoints,
-        orbitalAircraft(aircraftRef.current).map((a) => ({ pos: a.pos })),
-        earthRotation,
-      );
+      if (now - lastSatUpdate >= SAT_UPDATE_INTERVAL_MS) {
+        lastSatUpdate = now;
+        // Earth only turns ~0.04° in one interval, so the tiny lag between
+        // recomputes (satellites drawn at the rotation angle from their last
+        // update, not this exact instant) is imperceptible — not worth
+        // re-touching every point's buffer every frame to correct for it.
+        updatePoints(satPoints, orbitalSatellites(tlesRef.current, new Date()), earthRotation);
+        updatePoints(
+          acPoints,
+          orbitalAircraft(aircraftRef.current).map((a) => ({ pos: a.pos })),
+          earthRotation,
+        );
+      }
 
       const obsEcef = geodeticToEcefKm(c.centerLat, c.centerLon, 0);
       const obsScene = ecefToScene(obsEcef, earthRotation);
