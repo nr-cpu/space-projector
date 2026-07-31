@@ -76,7 +76,10 @@ export function OrbitalView({ cfg, tles, aircraft, pullback }: OrbitalViewProps)
 
     const earthRadius = EARTH_RADIUS_KM * SCENE_SCALE;
     const texLoader = new THREE.TextureLoader();
-    const earthTex = texLoader.load("/textures/earth-day.jpg");
+    // import.meta.env.BASE_URL (Vite's configured `base`, e.g. "/space-projector/"
+    // on the GitHub Pages deploy) — a hardcoded absolute "/textures/..." path
+    // resolves against the domain root instead and 404s under any subpath deploy.
+    const earthTex = texLoader.load(`${import.meta.env.BASE_URL}textures/earth-day.jpg`);
     earthTex.colorSpace = THREE.SRGBColorSpace;
     const earth = new THREE.Mesh(
       new THREE.SphereGeometry(earthRadius, 64, 64),
