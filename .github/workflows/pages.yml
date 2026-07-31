@@ -1,9 +1,11 @@
 name: Deploy display preview to GitHub Pages
 
-# Builds only the web/display client as a static preview. No radio, no
-# server-side aircraft/satellite feed, no config persistence — those need
-# the real Node server (see README: pnpm install && pnpm dev). This is a
-# look-at-the-code / see-the-renderer preview, not a functioning appliance.
+# Builds only the web/display client as a static preview. Stars, planets,
+# Milky Way, satellites, and comets all render from data embedded in the
+# bundle at build time (see shared/scripts/build-*.mjs), so the sky is real
+# even with no backend. What's missing without the real Node server: live
+# radio/API aircraft tracking, always-fresh satellite/comet data, and config
+# persistence (see README: pnpm install && pnpm dev for the real thing).
 
 on:
   push:
